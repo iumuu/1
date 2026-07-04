@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   ovh-bot:
-    build: .
+    image: gvddfdf/ovh-bot:latest
     container_name: ovh-bot
     restart: unless-stopped
     environment:
@@ -20,7 +20,7 @@ services:
 
   # 可选：监控模式
   # ovh-monitor:
-  #   build: .
+  #   image: gvddfdf/ovh-bot:latest
   #   container_name: ovh-monitor
   #   restart: unless-stopped
   #   environment:
@@ -32,4 +32,4 @@ services:
   #     - TG_BOT_TOKEN=${TG_BOT_TOKEN}
   #     - TG_ALLOWED_USERS=${TG_ALLOWED_USERS}
   #     - TG_CHAT_ID=${TG_CHAT_ID}
-  #   command: ["python3", "monitor.py", "26sk10b-v1", "24sk202"]
+  #   command: ["python3", "monitor.py", "ks-1-b", "ks-stor"]
