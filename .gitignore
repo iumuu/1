@@ -2,6 +2,4 @@ __pycache__/
 *.pyc
 config.toml
 deploy.sh
-.env
-.git
-.gitignore
+*.env
