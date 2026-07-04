@@ -5,6 +5,14 @@ LABEL description="OVH 服务器抢购 Bot - TG Bot 自动下单锁定订单"
 
 WORKDIR /app
 
+# 安装时区数据
+RUN apk add --no-cache tzdata && \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone && \
+    apk del tzdata
+
+ENV TZ=Asia/Shanghai
+
 # 安装依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

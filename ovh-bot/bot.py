@@ -29,7 +29,23 @@ import time
 import traceback
 import asyncio
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# 北京时区 (UTC+8)
+BJT = timezone(timedelta(hours=8))
+
+
+def to_bjt(dt_str: str) -> str:
+    """将 OVH 返回的时间字符串转换为北京时间可读格式"""
+    if not dt_str or dt_str == "N/A":
+        return "N/A"
+    try:
+        # OVH 格式: 2026-07-04T09:24:47+02:00
+        dt = datetime.fromisoformat(dt_str)
+        dt_bjt = dt.astimezone(BJT)
+        return dt_bjt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return dt_str
 
 import requests
 import ovh
@@ -1583,7 +1599,7 @@ def run_bot(cfg: dict):
             text = (
                 f"📋 订单 {order_id}\n\n"
                 f"状态: {status}\n"
-                f"日期: {order.get('date', 'N/A')}"
+                f"日期: {to_bjt(order.get('date', 'N/A'))}"
             )
             await update.message.reply_text(text)
         except Exception as e:
@@ -1874,7 +1890,7 @@ def run_cli(cfg: dict):
             status = client.get_order_status(args.order_id)
             print(f"📋 订单 {args.order_id}")
             print(f"   状态: {status}")
-            print(f"   日期: {order.get('date', 'N/A')}")
+            print(f"   日期: {to_bjt(order.get('date', 'N/A'))}")
         except Exception as e:
             print(f"❌ 查询失败: {e}")
 
