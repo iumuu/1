@@ -1,3 +1,8 @@
-ovh-bot/__pycache__/
+# 凭证文件 - 不要上传
+deploy.sh
+config.toml
+*.env
+
+# Python
+__pycache__/
 *.pyc
-ovh-bot/config.toml

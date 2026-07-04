@@ -7,14 +7,14 @@ services:
     restart: unless-stopped
     environment:
       - OVH_ENDPOINT=ovh-eu
-      - OVH_APPLICATION_KEY=c5449be2854c6c80
-      - OVH_APPLICATION_SECRET=0cf48df891c611f633bac800d515320d
-      - OVH_CONSUMER_KEY=70c714e838518d456e1d14cc7cf6c7c8
-      - OVH_ZONE=IE
-      - TG_BOT_TOKEN=8771867858:AAGuonJsnsf9bcS_NV_LRErWPNUl8_wKBp8
-      - TG_ALLOWED_USERS=5113786725
-      - TG_CHAT_ID=5113786725
-    # 也可以用配置文件（二选一，注释掉 environment 即可）
+      - OVH_APPLICATION_KEY=${OVH_APPLICATION_KEY}
+      - OVH_APPLICATION_SECRET=${OVH_APPLICATION_SECRET}
+      - OVH_CONSUMER_KEY=${OVH_CONSUMER_KEY}
+      - OVH_ZONE=${OVH_ZONE:-IE}
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN}
+      - TG_ALLOWED_USERS=${TG_ALLOWED_USERS}
+      - TG_CHAT_ID=${TG_CHAT_ID}
+    # 也可以用配置文件（二选一）
     # volumes:
     #   - ./config.toml:/app/data/config.toml:ro
 
@@ -25,11 +25,11 @@ services:
   #   restart: unless-stopped
   #   environment:
   #     - OVH_ENDPOINT=ovh-eu
-  #     - OVH_APPLICATION_KEY=your_key
-  #     - OVH_APPLICATION_SECRET=your_secret
-  #     - OVH_CONSUMER_KEY=your_ck
-  #     - OVH_ZONE=IE
-  #     - TG_BOT_TOKEN=your_bot_token
-  #     - TG_ALLOWED_USERS=your_user_id
-  #     - TG_CHAT_ID=your_chat_id
+  #     - OVH_APPLICATION_KEY=${OVH_APPLICATION_KEY}
+  #     - OVH_APPLICATION_SECRET=${OVH_APPLICATION_SECRET}
+  #     - OVH_CONSUMER_KEY=${OVH_CONSUMER_KEY}
+  #     - OVH_ZONE=${OVH_ZONE:-IE}
+  #     - TG_BOT_TOKEN=${TG_BOT_TOKEN}
+  #     - TG_ALLOWED_USERS=${TG_ALLOWED_USERS}
+  #     - TG_CHAT_ID=${TG_CHAT_ID}
   #   command: ["python3", "monitor.py", "26sk10b-v1", "24sk202"]
