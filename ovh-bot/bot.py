@@ -774,10 +774,16 @@ class OVHClient:
         return self.get(f"/me/order/{order_id}/status")
 
     def get_payment_url(self, order_id: int) -> str:
+        """获取订单付款链接"""
         try:
-            return self.get(f"/me/order/{order_id}/url")
+            result = self.get(f"/me/order/{order_id}/url")
+            if result and isinstance(result, str) and result.startswith("http"):
+                return result
         except Exception:
-            return f"https://www.ovh.com/cgi-bin/order/payment.cgi?orderId={order_id}"
+            pass
+        # 根据区域构造正确的付款链接
+        zone_lower = self.zone.lower()
+        return f"https://order.eu.ovhcloud.com/en-{zone_lower}/express/#/instant/displayOrder?orderId={order_id}"
 
     def delete_cart(self, cart_id: str) -> dict:
         return self.delete(f"/order/cart/{cart_id}")
