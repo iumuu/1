@@ -474,6 +474,98 @@ class OVHClient:
             logger.error(f"获取目录失败: {e}")
             return {}
 
+    def get_config_price(self, plan_code: str, datacenter: str,
+                         memory: str, storage: str) -> str:
+        """通过创建临时购物车获取指定配置的精确价格
+
+        Returns: 价格字符串如 "€47.98" 或 ""
+        """
+        cart_id = None
+        try:
+            # 创建购物车
+            cart = self.create_cart()
+            cart_id = cart["cartId"]
+
+            # 添加基础商品
+            item_result = self.post(
+                f"/order/cart/{cart_id}/eco",
+                planCode=plan_code,
+                duration="P1M",
+                pricingMode="default",
+                quantity=1,
+            )
+            item_id = item_result["itemId"]
+
+            # 设置数据中心区域
+            region = get_region_for_dc(datacenter)
+            configurations = {
+                "dedicated_datacenter": datacenter,
+                "dedicated_os": "none_64.en",
+            }
+            if region:
+                configurations["region"] = region
+
+            for label, value in configurations.items():
+                try:
+                    self.post(
+                        f"/order/cart/{cart_id}/item/{item_id}/configuration",
+                        label=label,
+                        value=str(value),
+                    )
+                except Exception:
+                    pass
+
+            # 添加硬件选项
+            options = self._find_addon_options(plan_code, memory, storage)
+            if options:
+                try:
+                    available_opts = self.get(
+                        f"/order/cart/{cart_id}/eco/options",
+                        planCode=plan_code,
+                    )
+                    for wanted in options:
+                        for avail in available_opts:
+                            if avail.get("planCode") == wanted:
+                                try:
+                                    self.post(
+                                        f"/order/cart/{cart_id}/eco/options",
+                                        itemId=item_id,
+                                        planCode=wanted,
+                                        duration=avail.get("duration", "P1M"),
+                                        pricingMode=avail.get("pricingMode", "default"),
+                                        quantity=1,
+                                    )
+                                except Exception:
+                                    pass
+                                break
+                except Exception:
+                    pass
+
+            # 获取价格
+            summary = self.get(f"/order/cart/{cart_id}/summary")
+            prices = summary.get("prices", {})
+            with_tax = prices.get("withTax", {})
+            price_value = with_tax.get("value") if isinstance(with_tax, dict) else with_tax
+            currency = with_tax.get("currencyCode", "EUR") if isinstance(with_tax, dict) else "EUR"
+
+            if price_value is not None:
+                # 转换为可读格式
+                if isinstance(price_value, (int, float)):
+                    if price_value > 100000:
+                        price_value = price_value / 100000000  # OVH 返回的是纳单位
+                    return f"{price_value:.2f} {currency}"
+                return str(price_value)
+            return ""
+        except Exception as e:
+            logger.warning(f"查价失败: {e}")
+            return ""
+        finally:
+            if cart_id:
+                try:
+                    self.delete_cart(cart_id)
+                except Exception:
+                    pass
+
     def get_plan_addon_families(self, plan_code: str, category: str = "eco") -> list:
         """获取 planCode 的 addonFamilies（用于查找硬件选项）"""
         try:
@@ -1123,7 +1215,7 @@ def run_bot(cfg: dict):
             return
 
         if not context.args:
-            await update.message.reply_text("用法: /check <planCode>\n示例: /check 26sk10b-v1")
+            await update.message.reply_text("用法: /check <planCode>\n示例: /check ks-1-b")
             return
 
         plan_code = resolve_plan_code(context.args[0])
@@ -1137,7 +1229,44 @@ def run_bot(cfg: dict):
             await msg.edit_text(f"❌ 未获取到 `{plan_code}` 的可用性数据", parse_mode="Markdown")
             return
 
-        text = f"📊 *{plan_code} 可用性报告*\n（共 {len(all_configs)} 个配置组合）\n\n"
+        # 获取基础价格（从 catalog）
+        base_price_str = ""
+        try:
+            catalog = ovh_client.get_catalog('eco')
+            for plan in catalog.get('plans', []):
+                if plan.get('planCode') == plan_code:
+                    pricings = plan.get('pricings', [])
+                    for p in pricings:
+                        if p.get('capacities') == ['installation'] and p.get('phase') == 0:
+                            install = p.get('formattedPrice', '')
+                        if p.get('capacities') == ['renew'] and p.get('interval') == 1:
+                            monthly = p.get('formattedPrice', '')
+                    invoice_name = plan.get('invoiceName', '')
+                    base_price_str = f"\n💰 基础价: {monthly}/月 + {install} 安装费"
+                    break
+        except Exception:
+            pass
+
+        # 收集有货的配置（需要查价格）
+        available_configs_to_price = []
+        for cfg in all_configs:
+            for dc, status in cfg["datacenters"].items():
+                if status not in UNAVAILABLE_STATES:
+                    available_configs_to_price.append((cfg, dc, status))
+
+        # 有货的才实时查价（避免无货时浪费时间）
+        price_cache = {}  # key=fqn|dc, value=price_str
+        if available_configs_to_price:
+            await msg.edit_text(f"🔍 查询可用性中...（{len(available_configs_to_price)} 个有货配置查价格中）", parse_mode="Markdown")
+            for cfg, dc, status in available_configs_to_price:
+                try:
+                    price = ovh_client.get_config_price(plan_code, dc, cfg["memory"], cfg["storage"])
+                    if price:
+                        price_cache[f"{cfg['fqn']}|{dc}"] = price
+                except Exception as e:
+                    logger.warning(f"查价失败 {cfg['fqn']}@{dc}: {e}")
+
+        text = f"📊 *{plan_code} 可用性报告*{base_price_str}\n（共 {len(all_configs)} 个配置组合）\n\n"
         buttons = []
 
         for idx, cfg in enumerate(all_configs):
@@ -1145,7 +1274,6 @@ def run_bot(cfg: dict):
             stor_display = format_storage(cfg["storage"])
             stor_raw = cfg["storage"].lower()
 
-            # 提取存储关键词，用于一键下单按钮
             stor_keyword = ""
             if "nvme" in stor_raw:
                 m = re.search(r'(\d+x\d+nvme)', stor_raw)
@@ -1159,12 +1287,14 @@ def run_bot(cfg: dict):
             has_available = False
             for dc, status in cfg["datacenters"].items():
                 dc_display = DC_DISPLAY_MAP.get(dc, dc)
+                key = f"{cfg['fqn']}|{dc}"
+                price_str = price_cache.get(key, "")
                 if status in UNAVAILABLE_STATES:
                     text += f"   ❌ {dc}: {status}\n"
                 else:
                     has_available = True
-                    text += f"   ✅ {dc}: {status}\n"
-                    # 为每个有货的配置+机房添加下单按钮
+                    price_text = f" 💰{price_str}" if price_str else ""
+                    text += f"   ✅ {dc}: {status}{price_text}\n"
                     btn_label = f"🛒#{idx+1} {stor_display} @{dc}"
                     callback = f"buy|{plan_code}|{dc}|{stor_keyword}"
                     buttons.append([InlineKeyboardButton(btn_label, callback_data=callback)])
