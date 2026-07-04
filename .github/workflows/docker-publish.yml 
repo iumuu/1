@@ -27,7 +27,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./ovh-bot
-          file: ./ovh-bot/Dockerfile      ← 加这行
+          file: ./ovh-bot/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
