@@ -845,8 +845,8 @@ class OVHClient:
 # 消息解析辅助函数
 # ============================================================
 PLAN_CODE_PATTERNS = [
-    r'\b(24s[a-z]{2,3}\d{2}(?:-v\d+)?)\b',
-    r'\b(25s[a-z]{2,3}\d{2}(?:-v\d+)?)\b',
+    # 匹配 OVH planCode: 24sk202, 26sk10b-v1, 24skstor012-v1, 24rise02-v1, 24adv01-v3, 25risel01-v1 等
+    r'\b(\d{2}[a-z]+\w*(?:-v\d+)?)\b',
     r'\b(rise-\d+)\b',
     r'\b(advance-\d+)\b',
     r'\b(scale-\d+)\b',
@@ -858,6 +858,89 @@ PLAN_CODE_PATTERNS = [
     r'\b(grf-\d+)\b',
     r'\b(hgr-[a-z]+-\d+)\b',
 ]
+
+# 服务器友好名称 → planCode 映射表
+# 用户可以直接用名称，如 /watch ks-1-b fra nvme
+SERVER_NAME_MAP = {
+    # KS 系列
+    "ks-1": "24sk102", "ks1": "24sk102",
+    "ks-1-b": "26sk10b-v1", "ks1b": "26sk10b-v1", "ks-1b": "26sk10b-v1",
+    "ks-2": "24sk202", "ks2": "24sk202",
+    "ks-3": "24sk302", "ks3": "24sk302",
+    "ks-4": "24sk402", "ks4": "24sk402",
+    "ks-5": "24sk502", "ks5": "24sk502",
+    "ks-5-a": "26sk50a-v1", "ks5a": "26sk50a-v1",
+    "ks-5-b": "26sk50b-v1", "ks5b": "26sk50b-v1",
+    "ks-6": "24sk602", "ks6": "24sk602",
+    "ks-6-b": "25sk602b", "ks6b": "25sk602b",
+    "ks-7": "24sk702", "ks7": "24sk702",
+    "ks-a": "24ska012", "ksa": "24ska012",
+    "ks-b": "25skb012", "ksb": "25skb012",
+    "ks-c": "25skc012", "ksc": "25skc012",
+    "ks-stor": "24skstor012-v1", "ksstor": "24skstor012-v1",
+    "ks-game": "24skgame012", "ksgame": "24skgame012",
+    # RISE 系列
+    "rise-1": "24rise01-v1", "rise1": "24rise01-v1",
+    "rise-2": "24rise02-v1", "rise2": "24rise02-v1",
+    "rise-3": "24rise03-v1", "rise3": "24rise03-v1",
+    "rise-4": "24rise04-v1", "rise4": "24rise04-v1",
+    "rise-5": "24rise05-v1", "rise5": "24rise05-v1",
+    "rise-6": "24rise06-v1", "rise6": "24rise06-v1",
+    "rise-7": "24rise072", "rise7": "24rise072",
+    "rise-8": "24rise082", "rise8": "24rise082",
+    "rise-9": "24rise092", "rise9": "24rise092",
+    "rise-l": "25risel01-v1", "risel": "25risel01-v1",
+    "rise-s": "25rises01-v1", "rises": "25rises01-v1",
+    "rise-m": "25risem01-v1", "risem": "25risem01-v1",
+    "rise-xl": "25risexl01-v1", "risexl": "25risexl01-v1",
+    "rise-stor": "24risestor012", "risestor": "24risestor012",
+    "rise-game-1": "24risegame012", "risegame1": "24risegame012",
+    "rise-game-2": "24risegame022", "risegame2": "24risegame022",
+    # SYS 系列
+    "sys-1": "24sys012", "sys1": "24sys012",
+    "sys-2": "24sys022", "sys2": "24sys022",
+    "sys-3": "24sys032", "sys3": "24sys032",
+    "sys-4": "24sys043", "sys4": "24sys043",
+    "sys-5": "24sys053", "sys5": "24sys053",
+    "sys-6": "25sys062", "sys6": "25sys062",
+    "sys-stor": "24sysstor012-v1", "sysstor": "24sysstor012-v1",
+    "sys-game-1": "24sysgame012", "sysgame1": "24sysgame012",
+    "sys-game-2": "24sysgame022", "sysgame2": "24sysgame022",
+    # ADVANCE 系列
+    "advance-1": "24adv01-v3", "advance1": "24adv01-v3",
+    "advance-2": "24adv02-v3", "advance2": "24adv02-v3",
+    "advance-3": "24adv03-v3", "advance3": "24adv03-v3",
+    "advance-4": "24adv04-v3", "advance4": "24adv04-v3",
+    "advance-5": "24adv05-v3", "advance5": "24adv05-v3",
+    "advance-stor": "24advstor01-v3", "advancestor": "24advstor01-v3",
+}
+
+
+def resolve_plan_code(text: str) -> str:
+    """解析服务器型号 - 支持友好名称和 planCode
+
+    输入: ks-1-b / ks1b / KS-1-B / 26sk10b-v1 → 输出: 26sk10b-v1
+    """
+    if not text:
+        return None
+
+    text_lower = text.lower().strip()
+
+    # 0. 如果本身就是完整 planCode（直接包含数字+字母格式），直接返回
+    if re.match(r'^\d{2}\w+$', text_lower):
+        return text_lower
+
+    # 1. 查友好名称映射表
+    if text_lower in SERVER_NAME_MAP:
+        return SERVER_NAME_MAP[text_lower]
+
+    # 2. 正则匹配 planCode 格式
+    for pattern in PLAN_CODE_PATTERNS:
+        m = re.search(pattern, text_lower)
+        if m:
+            return m.group(1)
+
+    return None
 
 DATACENTER_MAP = {
     "bhs": "bhs", "beauharnois": "bhs", "加拿大": "bhs",
@@ -894,9 +977,15 @@ DC_DISPLAY_MAP = {
 
 
 def parse_plan_code(text: str):
-    text = text.lower()
+    """从文本中提取 planCode（兼容旧调用，内部使用 resolve_plan_code）"""
+    text_lower = text.lower()
+    # 1. 先查友好名称
+    for name, pc in SERVER_NAME_MAP.items():
+        if name in text_lower:
+            return pc
+    # 2. 正则匹配
     for pattern in PLAN_CODE_PATTERNS:
-        m = re.search(pattern, text)
+        m = re.search(pattern, text_lower)
         if m:
             return m.group(1)
     return None
@@ -993,7 +1082,10 @@ def run_bot(cfg: dict):
             )
             return
 
-        plan_code = context.args[0]
+        plan_code = resolve_plan_code(context.args[0])
+        if not plan_code:
+            await update.message.reply_text(f"❌ 无法识别型号: {context.args[0]}\n\n可用名称: ks-1-b, ks-stor, ks-2, rise-2 等")
+            return
         dc = context.args[1] if len(context.args) > 1 else None
         target_storage = context.args[2] if len(context.args) > 2 else None
         target_memory = context.args[3] if len(context.args) > 3 else None
@@ -1034,7 +1126,10 @@ def run_bot(cfg: dict):
             await update.message.reply_text("用法: /check <planCode>\n示例: /check 26sk10b-v1")
             return
 
-        plan_code = context.args[0]
+        plan_code = resolve_plan_code(context.args[0])
+        if not plan_code:
+            await update.message.reply_text(f"❌ 无法识别型号: {context.args[0]}\n\n可用名称: ks-1-b, ks-stor, ks-2, rise-2 等")
+            return
         msg = await update.message.reply_text(f"🔍 正在查询 `{plan_code}` 所有配置的可用性...", parse_mode="Markdown")
 
         all_configs = ovh_client.check_availability(plan_code)
@@ -1184,7 +1279,10 @@ def run_bot(cfg: dict):
             )
             return
 
-        plan_code = context.args[0]
+        plan_code = resolve_plan_code(context.args[0])
+        if not plan_code:
+            await update.message.reply_text(f"❌ 无法识别型号: {context.args[0]}\n\n可用名称: ks-1-b, ks-stor, ks-2, rise-2 等")
+            return
         dc = context.args[1] if len(context.args) > 1 else None
         target_storage = context.args[2] if len(context.args) > 2 else None
         target_memory = context.args[3] if len(context.args) > 3 else None
@@ -1254,7 +1352,10 @@ def run_bot(cfg: dict):
             await update.message.reply_text(f"📭 已取消所有监控 ({count} 个)")
             return
 
-        plan_code = context.args[0]
+        plan_code = resolve_plan_code(context.args[0])
+        if not plan_code:
+            await update.message.reply_text(f"❌ 无法识别型号: {context.args[0]}\n\n可用名称: ks-1-b, ks-stor, ks-2, rise-2 等")
+            return
         if plan_code in watch_tasks:
             watch_tasks[plan_code]["active"] = False
             del watch_tasks[plan_code]
@@ -1371,7 +1472,9 @@ def run_bot(cfg: dict):
         parts = data.split("|")
 
         if parts[0] == "buy" and len(parts) >= 3:
-            plan_code = parts[1]
+            plan_code = resolve_plan_code(parts[1])
+            if not plan_code:
+                return
             dc = parts[2]
             target_storage = parts[3] if len(parts) > 3 else None
 
