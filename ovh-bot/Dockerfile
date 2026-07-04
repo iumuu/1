@@ -1,0 +1,34 @@
+FROM python:3.12-alpine
+
+LABEL maintainer="ovh-bot"
+LABEL description="OVH 服务器抢购 Bot - TG Bot 自动下单锁定订单"
+
+WORKDIR /app
+
+# 安装依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制脚本
+COPY bot.py .
+COPY monitor.py .
+COPY config.example.toml .
+
+# 数据目录
+RUN mkdir -p /app/data
+
+# 环境变量（可在 docker-compose 或 run 时覆盖）
+ENV OVH_ENDPOINT=ovh-eu
+ENV OVH_APPLICATION_KEY=""
+ENV OVH_APPLICATION_SECRET=""
+ENV OVH_CONSUMER_KEY=""
+ENV OVH_ZONE=IE
+ENV TG_BOT_TOKEN=""
+ENV TG_ALLOWED_USERS=""
+ENV TG_CHAT_ID=""
+
+# 配置文件挂载点
+VOLUME ["/app/data"]
+
+# 默认启动 Bot 模式
+CMD ["python3", "bot.py"]

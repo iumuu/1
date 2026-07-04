@@ -1,0 +1,44 @@
+# OVH 抢购脚本配置文件 v2
+# 复制此文件为 config.toml 并填入你的信息，或使用环境变量
+
+[ovh]
+# OVH API 凭证 - 从 https://api.ovh.com/createToken/ 获取
+# 权限需要: GET /*, POST /*
+endpoint = "ovh-eu"              # API endpoint: ovh-eu / ovh-ca / ovh-us (IE区也用ovh-eu)
+application_key = ""
+application_secret = ""
+consumer_key = ""
+# ovhSubsidiary 区域 - 关键！决定下单区域
+# IE = 爱尔兰, FR = 法国, DE = 德国, UK = 英国, CA = 加拿大, US = 美国, SG = 新加坡
+# IE 区通常价格最优，且服务器选择更多
+zone = "IE"
+
+[telegram]
+# Telegram Bot Token - 从 @BotFather 获取
+bot_token = ""
+# 允许使用的用户 ID（你的 TG 用户 ID），多个用逗号分隔
+allowed_users = []
+# 监控通知的 chat_id（可以是你的用户 ID 或群组 ID）
+chat_id = ""
+
+[monitor]
+# 监控的服务器 planCode 列表，支持同时监控多个
+# 例如: ["24ska01", "24sklea01", "ks-a"]
+watch_list = []
+# 检查间隔（秒），建议 10-30
+interval = 10
+# 发现有货时自动下单（true）还是只通知（false）
+auto_buy = true
+# 限制只监控特定数据中心，留空表示监控全部
+# 例如: "fra" 只监控法兰克福
+datacenter = ""
+
+[defaults]
+# 默认操作系统: none_64.en / debian_12_64 / ubuntu_24_04_64
+os = "none_64.en"
+# 默认时长
+duration = "P1M"
+# 自动分配购物车
+auto_assign = true
+# 自动结账（生成订单但不付款）
+auto_checkout = true

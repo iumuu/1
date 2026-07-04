@@ -1,0 +1,3 @@
+ovh-bot/__pycache__/
+*.pyc
+ovh-bot/config.toml
