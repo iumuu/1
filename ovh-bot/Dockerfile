@@ -13,6 +13,9 @@ RUN apk add --no-cache tzdata && \
 
 ENV TZ=Asia/Shanghai
 
+# 数据持久化目录
+ENV OVH_BOT_DATA_DIR=/app/data
+
 # 安装依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

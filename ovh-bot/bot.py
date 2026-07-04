@@ -1332,7 +1332,38 @@ def run_bot(cfg: dict):
     # ---- 内置监控器 ----
     # 监控任务: {plan_code: {"dc": str|None, "storage": str|None, "memory": str|None,
     #                         "max_orders": int, "ordered": int, "active": bool}}
+    import os as _os
+    DATA_DIR = _os.environ.get("OVH_BOT_DATA_DIR", "/app/data")
+    WATCH_FILE = _os.path.join(DATA_DIR, "watch_tasks.json")
+
+    def save_watch_tasks():
+        """持久化监控任务到文件"""
+        try:
+            _os.makedirs(DATA_DIR, exist_ok=True)
+            serializable = {}
+            for pc, task in watch_tasks.items():
+                serializable[pc] = {k: v for k, v in task.items() if not k.startswith("_")}
+            with open(WATCH_FILE, "w") as f:
+                json.dump(serializable, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"保存监控任务失败: {e}")
+
+    def load_watch_tasks():
+        """从文件加载监控任务"""
+        try:
+            if _os.path.exists(WATCH_FILE):
+                with open(WATCH_FILE, "r") as f:
+                    data = json.load(f)
+                for pc, task in data.items():
+                    task["_last_order_time"] = {}
+                    watch_tasks[pc] = task
+                if watch_tasks:
+                    logger.info(f"从文件恢复 {len(watch_tasks)} 个监控任务")
+        except Exception as e:
+            logger.warning(f"加载监控任务失败: {e}")
+
     watch_tasks = {}
+    load_watch_tasks()  # 启动时恢复
     watch_running = False
     watch_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
 
@@ -1346,6 +1377,7 @@ def run_bot(cfg: dict):
                         continue
                     if task["ordered"] >= task["max_orders"]:
                         task["active"] = False
+                        save_watch_tasks()
                         await _send_msg(f"🎯 `{plan_code}` 已达到下单上限 ({task['max_orders']}单)，监控自动停止")
                         continue
 
@@ -1386,10 +1418,12 @@ def run_bot(cfg: dict):
                                 task["ordered"] += 1
                                 last_order_time[cooldown_key] = now
                                 task["_last_order_time"] = last_order_time
+                                save_watch_tasks()
                                 text = _format_buy_result(result)
                                 text += f"\n\n📊 监控进度: 已下 {task['ordered']}/{task['max_orders']} 单"
                                 if task["ordered"] >= task["max_orders"]:
                                     task["active"] = False
+                                    save_watch_tasks()
                                     text += "\n🎯 已达上限，监控自动停止"
                             else:
                                 text = f"❌ 监控自动下单失败: `{plan_code}`\n{result['error']}"
@@ -1461,8 +1495,9 @@ def run_bot(cfg: dict):
             "active": True,
             "_last_order_time": {},
         }
+        save_watch_tasks()
 
-        # 启动后台监控（如果未运行）
+        # 启动后台监控（如果未运行或有恢复的任务）
         nonlocal watch_running
         if not watch_running:
             watch_running = True
@@ -1501,6 +1536,7 @@ def run_bot(cfg: dict):
             for pc in watch_tasks:
                 watch_tasks[pc]["active"] = False
             watch_tasks.clear()
+            save_watch_tasks()
             await update.message.reply_text(f"📭 已取消所有监控 ({count} 个)")
             return
 
@@ -1511,6 +1547,7 @@ def run_bot(cfg: dict):
         if plan_code in watch_tasks:
             watch_tasks[plan_code]["active"] = False
             del watch_tasks[plan_code]
+            save_watch_tasks()
             await update.message.reply_text(f"📭 已取消监控 `{plan_code}`", parse_mode="Markdown")
         else:
             await update.message.reply_text(f"⚠️ `{plan_code}` 不在监控列表中", parse_mode="Markdown")
@@ -1779,6 +1816,14 @@ def run_bot(cfg: dict):
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # 如果有恢复的监控任务，自动启动监控循环
+    if watch_tasks:
+        active_count = sum(1 for t in watch_tasks.values() if t.get("active"))
+        if active_count > 0:
+            watch_running = True
+            asyncio.ensure_future(watch_monitor_loop())
+            logger.info(f"恢复 {active_count} 个监控任务，自动启动监控循环")
 
     logger.info(f"🤖 OVH 抢购 Bot v2 启动 (区域: {ovh_client.zone}/{ovh_client.subsidiary})")
     app.run_polling()
