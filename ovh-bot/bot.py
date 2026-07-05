@@ -1313,10 +1313,7 @@ def run_bot(cfg: dict):
             "/catalog — 查看服务器目录\n\n"
             "🖥️ *服务器管理:*\n"
             "/servers — 按钮式安装/重启，自动识别磁盘组\n"
-            "/keys — 查看 OVH 预设 SSH 密钥\n"
-            "/reinstall <序号> — 高级命令/查看可用系统\n"
-            "/reinstall <序号> <系统名> [key=密钥名] [raid0 group=N] — 安装系统\n"
-            "/reboot <序号> — 重启服务器\n\n"
+            "/keys — 查看 OVH 预设 SSH 密钥\n\n"
             "💡 直接转发 OVH 服务器信息也可自动下单！\n"
             f"🌐 当前区域: {ovh_client.zone} / {ovh_client.subsidiary}",
             parse_mode="Markdown",
@@ -1909,7 +1906,7 @@ def run_bot(cfg: dict):
                     InlineKeyboardButton(f"🔄 重启 {i+1}", callback_data=f"srv|reboot|{action_id}"),
                 ])
 
-            lines.append("💡 也可用命令: /reinstall <序号> 或 /reboot <序号>")
+            lines.append("💡 点按钮即可安装系统或重启服务器")
             await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
             await msg.edit_text(f"❌ 获取失败: {e}")
@@ -1924,7 +1921,7 @@ def run_bot(cfg: dict):
                 await update.message.reply_text("📭 OVH 账号里没有预设 SSH 密钥")
                 return
             text = "🔑 *OVH 预设 SSH 密钥*\n\n" + "\n".join(f"• `{k}`" for k in keys)
-            text += "\n\n💡 重装时使用: `/reinstall 1 debian12_64 key=密钥名`"
+            text += "\n\n💡 安装系统请用 /servers 按钮流程选择密钥"
             await update.message.reply_text(text, parse_mode="Markdown")
         except Exception as e:
             await update.message.reply_text(f"❌ 获取密钥失败: {e}")
@@ -1936,12 +1933,12 @@ def run_bot(cfg: dict):
 
         if not context.args:
             await update.message.reply_text(
-                "用法:\n"
-                "/servers — 用按钮选择服务器、系统、SSH key、磁盘方案\n\n"
-                "高级命令:\n"
-                "/reinstall <序号> — 查看可用系统\n"
-                "/reinstall <序号> <系统名> [key=密钥名] [raid0 group=N disks=N] [host=主机名]\n\n"
-                "推荐直接用 /servers 按钮流程，避免 group 写错。"
+                "安装系统请使用 /servers 按钮流程：\n"
+                "1. 选择服务器\n"
+                "2. 选择系统\n"
+                "3. 选择 SSH key\n"
+                "4. 选择磁盘方案\n"
+                "5. 确认安装"
             )
             return
 
@@ -1990,7 +1987,7 @@ def run_bot(cfg: dict):
                     lines.append(f"  `{t}`")
                 lines.append("")
 
-            lines.append(f"💡 `/reinstall <序号> <系统名>` 安装\n⚠️ 安装会清除所有数据！")
+            lines.append(f"💡 安装系统请使用 /servers 按钮流程\n⚠️ 安装会清除所有数据！")
             text = "\n".join(lines)
             if len(text) > 4000:
                 text = text[:3900] + "\n... (已截断)"
@@ -2027,7 +2024,7 @@ def run_bot(cfg: dict):
                 unknown_opts.append(opt)
 
         if unknown_opts:
-            await update.message.reply_text(f"❌ 无法识别参数: {' '.join(unknown_opts)}\n支持: key=密钥名 raid0 disks=N host=主机名")
+            await update.message.reply_text(f"❌ 无法识别参数: {' '.join(unknown_opts)}\n请使用 /servers 按钮流程安装系统")
             return
 
         if ssh_key_name:
