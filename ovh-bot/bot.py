@@ -1331,15 +1331,9 @@ def run_bot(cfg: dict):
 
         if not context.args:
             await update.message.reply_text(
-                "用法: /buy <planCode> [dc] [存储] [内存]\n\n"
-                "示例:\n"
-                "  /buy 26sk10b-v1 fra nvme         → 法兰克福 NVMe 版\n"
-                "  /buy 26sk10b-v1 fra hdd           → 法兰克福 HDD 版\n"
-                "  /buy 26sk10b-v1 fra 2x500nvme     → 精确指定 2x500GB NVMe\n"
-                "  /buy 26sk10b-v1 fra nvme 32g      → 32GB + NVMe\n"
-                "  /buy 24sk202 rbx                  → 不指定存储（自动选有货）\n\n"
-                "存储关键词: nvme / hdd / 2x500nvme / 2x4hdd 等\n"
-                "内存关键词: 32g / 64g"
+                "用法: /buy <planCode>\n\n"
+                "示例: /buy ks-1-b\n\n"
+                "然后用按钮选择配置和机房。"
             )
             return
 
@@ -1347,37 +1341,33 @@ def run_bot(cfg: dict):
         if not plan_code:
             await update.message.reply_text(f"❌ 无法识别型号: {context.args[0]}\n\n可用名称: ks-1-b, ks-stor, ks-2, rise-2 等")
             return
-        dc = context.args[1] if len(context.args) > 1 else None
-        target_storage = context.args[2] if len(context.args) > 2 else None
-        target_memory = context.args[3] if len(context.args) > 3 else None
 
-        # 如果 dc 看起来是存储关键词而不是机房，自动调整
-        if dc and dc.lower() in ("nvme", "hdd", "ssd", "sas") or (dc and re.match(r'\d+x\d+', dc.lower())):
-            target_storage = dc
-            dc = None
+        msg = await update.message.reply_text(f"🔍 正在查询 `{plan_code}` 可抢配置...", parse_mode="Markdown")
+        all_configs = ovh_client.check_availability(plan_code)
+        if not all_configs:
+            await msg.edit_text(f"❌ 未获取到 `{plan_code}` 的可用性数据", parse_mode="Markdown")
+            return
 
-        server_type = guess_server_type(plan_code)
+        session_id = str(int(time.time() * 1000))[-10:]
+        buy_sessions[session_id] = {
+            "plan_code": plan_code,
+            "all_configs": all_configs,
+            "selected_cfg": None,
+            "selected_dc": None,
+            "target_storage": None,
+            "target_memory": None,
+            "count": 1,
+        }
 
-        filter_desc = f"存储={target_storage}" if target_storage else ""
-        if target_memory:
-            filter_desc += f" 内存={target_memory}" if filter_desc else f"内存={target_memory}"
-        filter_str = f" ({filter_desc})" if filter_desc else ""
+        buttons = []
+        for idx, cfg in enumerate(all_configs[:20]):
+            buttons.append([InlineKeyboardButton(
+                f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                callback_data=f"buy|cfg|{session_id}|{idx}"
+            )])
 
-        msg = await update.message.reply_text(
-            f"🚀 正在抢购 `{plan_code}`{filter_str}...",
-            parse_mode="Markdown",
-        )
-
-        result = ovh_client.quick_buy(
-            plan_code=plan_code,
-            server_type=server_type,
-            datacenter=dc,
-            target_storage=target_storage,
-            target_memory=target_memory,
-        )
-
-        text = _format_buy_result(result)
-        await msg.edit_text(text, parse_mode="Markdown")
+        text = f"🛒 *选择要抢购的配置*\n\n型号: `{plan_code}`\n\n点一个配置，再选机房。"
+        await msg.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user(update.effective_user.id):
@@ -1465,7 +1455,7 @@ def run_bot(cfg: dict):
                     price_text = f" 💰{price_str}" if price_str else ""
                     text += f"   ✅ {dc}: {status}{price_text}\n"
                     btn_label = f"🛒#{idx+1} {stor_display} @{dc}"
-                    callback = f"buy|{plan_code}|{dc}|{stor_keyword}"
+                    callback = f"buy|preset|{plan_code}|{dc}|{stor_keyword}"
                     buttons.append([InlineKeyboardButton(btn_label, callback_data=callback)])
 
             text += "\n"
@@ -1513,6 +1503,7 @@ def run_bot(cfg: dict):
     load_watch_tasks()  # 启动时恢复
     pending_actions = {}
     watch_sessions = {}
+    buy_sessions = {}
     watch_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
 
     async def watch_monitor_loop():
@@ -2108,28 +2099,43 @@ def run_bot(cfg: dict):
         data = query.data
         parts = data.split("|")
 
-        if parts[0] == "buy" and len(parts) >= 3:
-            plan_code = resolve_plan_code(parts[1])
+        if parts[0] == "buy" and len(parts) >= 3 and parts[1] == "preset":
+            plan_code = resolve_plan_code(parts[2])
             if not plan_code:
                 return
-            dc = parts[2]
-            target_storage = parts[3] if len(parts) > 3 else None
-
-            filter_str = f" (指定 {target_storage})" if target_storage else ""
-            await query.edit_message_text(
-                f"🚀 正在抢购 `{plan_code}` @ {dc}{filter_str}...",
-                parse_mode="Markdown",
-            )
-
-            server_type = guess_server_type(plan_code)
-            result = ovh_client.quick_buy(
-                plan_code=plan_code,
-                server_type=server_type,
-                datacenter=dc,
-                target_storage=target_storage,
-            )
-            text = _format_buy_result(result)
-            await query.edit_message_text(text, parse_mode="Markdown")
+            dc = parts[3]
+            target_storage = parts[4] if len(parts) > 4 else None
+            session_id = str(int(time.time() * 1000))[-10:]
+            all_configs = ovh_client.check_availability(plan_code)
+            buy_sessions[session_id] = {
+                "plan_code": plan_code,
+                "all_configs": all_configs,
+                "selected_cfg": None,
+                "selected_dc": None,
+                "target_storage": target_storage,
+                "target_memory": None,
+                "count": 1,
+            }
+            # 从 preset 直接带入第一步选择的配置和机房
+            selected = None
+            for idx, cfg in enumerate(all_configs):
+                if cfg["storage"].lower().find(target_storage or "") >= 0:
+                    selected = cfg
+                    break
+            if selected:
+                buy_sessions[session_id]["selected_cfg"] = selected
+                buy_sessions[session_id]["selected_dc"] = dc
+                keyboard = [
+                    [InlineKeyboardButton("1 单", callback_data=f"buy|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"buy|count|{session_id}|2")],
+                    [InlineKeyboardButton("3 单", callback_data=f"buy|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"buy|count|{session_id}|5")],
+                    [InlineKeyboardButton("10 单", callback_data=f"buy|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"buy|count|{session_id}|custom")],
+                ]
+                await query.edit_message_text(
+                    f"🎯 选择下单数量\n\n型号: `{plan_code}`\n配置: {format_memory(selected['memory'])} + {format_storage(selected['storage'])}\n机房: {dc}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
 
         elif parts[0] == "orders" and parts[1] == "p":
             # 订单翻页
@@ -2382,6 +2388,98 @@ def run_bot(cfg: dict):
                     reply_markup=keyboard
                 )
 
+        elif parts[0] == "buy" and len(parts) >= 3:
+            stage = parts[1]
+            session_id = parts[2]
+            session = buy_sessions.get(session_id)
+            if not session:
+                await query.edit_message_text("❌ 抢购会话已过期，请重新 /buy")
+                return
+
+            plan_code = session["plan_code"]
+            all_configs = session["all_configs"]
+
+            if stage == "cfg" and len(parts) >= 4:
+                idx = int(parts[3])
+                if idx < 0 or idx >= len(all_configs):
+                    await query.edit_message_text("❌ 配置已过期，请重新 /buy")
+                    return
+                cfg = all_configs[idx]
+                session["selected_cfg"] = cfg
+
+                dcs = []
+                for dc, status in cfg["datacenters"].items():
+                    if status not in UNAVAILABLE_STATES:
+                        dcs.append((dc, status))
+                if not dcs:
+                    await query.edit_message_text("😢 该配置当前没有可抢的机房，请重新 /buy")
+                    return
+
+                keyboard = []
+                for dc, status in dcs:
+                    keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"buy|dc|{session_id}|{dc}")])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif stage == "dc" and len(parts) >= 4:
+                dc = parts[3]
+                cfg = session.get("selected_cfg")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /buy")
+                    return
+                session["selected_dc"] = dc
+
+                keyboard = [
+                    [InlineKeyboardButton("1 单", callback_data=f"buy|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"buy|count|{session_id}|2")],
+                    [InlineKeyboardButton("3 单", callback_data=f"buy|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"buy|count|{session_id}|5")],
+                    [InlineKeyboardButton("10 单", callback_data=f"buy|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"buy|count|{session_id}|custom")],
+                    [InlineKeyboardButton("取消", callback_data="cancel")],
+                ]
+                await query.edit_message_text(
+                    f"🎯 选择下单数量\n\n"
+                    f"型号: `{plan_code}`\n"
+                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"机房: {dc}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif stage == "count" and len(parts) >= 4:
+                val = parts[3]
+                session["count"] = 1 if val == "custom" else int(val)
+                cfg = session.get("selected_cfg")
+                dc = session.get("selected_dc")
+                if not cfg or not dc:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /buy")
+                    return
+                confirm_id = str(int(time.time() * 1000))[-10:]
+                pending_actions[confirm_id] = {
+                    "type": "buy_start",
+                    "plan_code": plan_code,
+                    "fqn": cfg["fqn"],
+                    "dc": dc,
+                    "storage": cfg.get("storage"),
+                    "memory": cfg.get("memory"),
+                    "count": session.get("count", 1),
+                }
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🛒 确认开始抢购", callback_data=f"act|{confirm_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel"),
+                ]])
+                await query.edit_message_text(
+                    f"🛒 确认开始抢购\n\n"
+                    f"型号: `{plan_code}`\n"
+                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"机房: {dc}\n"
+                    f"下单数量: {session.get('count', 1)}",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+
         elif parts[0] == "act" and len(parts) >= 2:
             action_id = parts[1]
             action = pending_actions.pop(action_id, None)
@@ -2389,7 +2487,23 @@ def run_bot(cfg: dict):
                 await query.edit_message_text("❌ 操作已过期，请重新发起")
                 return
 
-            if action["type"] == "watch_start":
+            if action["type"] == "buy_start":
+                plan_code = action["plan_code"]
+                server_type = guess_server_type(plan_code)
+                await query.edit_message_text(f"🚀 正在抢购 `{plan_code}` @ {action.get('dc')}...")
+                result = ovh_client.quick_buy(
+                    plan_code=plan_code,
+                    server_type=server_type,
+                    datacenter=action.get("dc"),
+                    target_storage=action.get("storage"),
+                    target_memory=action.get("memory"),
+                )
+                text = _format_buy_result(result)
+                if action.get("count", 1) > 1 and result.get("success"):
+                    text += f"\n\n📊 已按按钮下单数: {action['count']}"
+                await query.edit_message_text(text, parse_mode="Markdown")
+
+            elif action["type"] == "watch_start":
                 plan_code = action["plan_code"]
                 watch_tasks[plan_code] = {
                     "dc": action.get("dc"),
