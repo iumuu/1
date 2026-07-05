@@ -1617,22 +1617,46 @@ def run_bot(cfg: dict):
         if not plan_code:
             await update.message.reply_text(f"❌ 无法识别型号: {context.args[0]}\n\n可用名称: ks-1-b, ks-stor, ks-2, rise-2 等")
             return
-        dc = context.args[1] if len(context.args) > 1 else None
-        target_storage = context.args[2] if len(context.args) > 2 else None
-        target_memory = context.args[3] if len(context.args) > 3 else None
-        max_orders = int(context.args[4]) if len(context.args) > 4 else 1
 
-        # 智能参数识别：dc 可能是存储关键词
-        if dc and dc.lower() in ("nvme", "hdd", "ssd", "sas"):
+        extras = list(context.args[1:])
+        dc = None
+        target_storage = None
+        target_memory = None
+        max_orders = 1
+
+        def is_memory_token(v: str) -> bool:
+            return bool(re.fullmatch(r"\d+[gG]", v) or re.fullmatch(r"\d+[mM]", v))
+
+        def is_count_token(v: str) -> bool:
+            return v.isdigit()
+
+        def is_storage_token(v: str) -> bool:
+            low = v.lower()
+            return low in ("nvme", "hdd", "ssd", "sas") or bool(re.fullmatch(r"\d+x\d+(nvme|hdd|ssd|sas)?", low))
+
+        # 从后往前解析：count -> memory -> storage -> dc
+        if extras and is_count_token(extras[-1]):
+            max_orders = int(extras.pop())
+        if extras and is_memory_token(extras[-1]):
+            target_memory = extras.pop()
+        if extras and is_storage_token(extras[-1]):
+            target_storage = extras.pop()
+        if extras:
+            dc = extras.pop(0)
+
+        # 兜底：如果第一个参数看起来像存储/内存，也做纠正
+        if dc and is_storage_token(dc):
             target_storage = dc
             dc = None
-        # target_storage 可能是 max_orders（纯数字）
-        if target_memory and target_memory.isdigit():
-            max_orders = int(target_memory)
-            target_memory = None
-        if target_storage and target_storage.isdigit():
+        if dc and is_memory_token(dc):
+            target_memory = dc
+            dc = None
+        if target_storage and is_count_token(target_storage):
             max_orders = int(target_storage)
             target_storage = None
+        if target_memory and is_count_token(target_memory):
+            max_orders = int(target_memory)
+            target_memory = None
 
         watch_tasks[plan_code] = {
             "dc": dc,
