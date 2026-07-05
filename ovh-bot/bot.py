@@ -1626,10 +1626,6 @@ def run_bot(cfg: dict):
                     available_cfgs.append(cfg)
                     break
 
-        if not available_cfgs:
-            await msg.edit_text(f"😢 `{plan_code}` 当前没有可监控的有货配置", parse_mode="Markdown")
-            return
-
         session_id = str(int(time.time() * 1000))[-10:]
         watch_sessions[session_id] = {
             "plan_code": plan_code,
@@ -1640,13 +1636,18 @@ def run_bot(cfg: dict):
         }
 
         buttons = []
-        for idx, cfg in enumerate(available_cfgs[:20]):
+        source_cfgs = available_cfgs if available_cfgs else all_configs
+        for idx, cfg in enumerate(source_cfgs[:20]):
             buttons.append([InlineKeyboardButton(
                 f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
                 callback_data=f"watch|cfg|{session_id}|{idx}"
             )])
 
-        text = f"📡 *选择要监控的配置*\n\n型号: `{plan_code}`\n\n点一个配置，再选机房。"
+        text = f"📡 *选择要监控的配置*\n\n型号: `{plan_code}`\n"
+        if available_cfgs:
+            text += "\n点一个有货配置，再选机房。"
+        else:
+            text += "\n当前没有有货配置，但仍可先设定监控条件。"
         await msg.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2334,6 +2335,29 @@ def run_bot(cfg: dict):
                     return
                 session["selected_dc"] = dc
 
+                keyboard = [
+                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
+                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
+                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
+                    [InlineKeyboardButton("取消", callback_data="cancel")],
+                ]
+                await query.edit_message_text(
+                    f"🎯 选择下单数量\n\n"
+                    f"型号: `{plan_code}`\n"
+                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"机房: {dc}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif stage == "count" and len(parts) >= 4:
+                val = parts[3]
+                session["max_orders"] = 1 if val == "custom" else int(val)
+                cfg = session.get("selected_cfg")
+                dc = session.get("selected_dc")
+                if not cfg or not dc:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    return
                 confirm_id = str(int(time.time() * 1000))[-10:]
                 pending_actions[confirm_id] = {
                     "type": "watch_start",
