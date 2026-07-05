@@ -1543,7 +1543,7 @@ def run_bot(cfg: dict):
                     if task["ordered"] >= task["max_orders"]:
                         task["active"] = False
                         save_watch_tasks()
-                        await _send_msg(f"🎯 `{plan_code}` 已达到下单上限 ({task['max_orders']}单)，监控自动停止")
+                        await _send_msg(f"🎯 `{plan_code}` 已达到下单上限 ({task['max_orders']}单)，监控自动停止", task.get("chat_id"))
                         continue
 
                     try:
@@ -1568,7 +1568,8 @@ def run_bot(cfg: dict):
                             await _send_msg(
                                 f"🔥 *监控发现 `{plan_code}` 有货！*\n"
                                 f"📍 {dc_display} | {chosen['memory_display']} + {chosen['storage_display']}\n"
-                                f"🚀 正在自动下单... ({task['ordered']+1}/{task['max_orders']})"
+                                f"🚀 正在自动下单... ({task['ordered']+1}/{task['max_orders']})",
+                                task.get("chat_id")
                             )
 
                             server_type = guess_server_type(plan_code)
@@ -1610,7 +1611,7 @@ def run_bot(cfg: dict):
                             else:
                                 text = f"❌ 监控自动下单失败: `{plan_code}`\n{result['error']}"
 
-                            await _send_msg(text)
+                            await _send_msg(text, task.get("chat_id"))
                     except Exception as e:
                         logger.error(f"监控 {plan_code} 出错: {e}")
 
@@ -1619,12 +1620,12 @@ def run_bot(cfg: dict):
 
             await asyncio.sleep(10)  # 每 10 秒检查一次
 
-    async def _send_msg(text: str):
-        """发送消息到默认 chat"""
+    async def _send_msg(text: str, chat_id: str = None):
+        """发送消息到指定 chat；未指定则回退到默认 chat"""
         try:
-            chat_id = str(tg_cfg.get("chat_id", ""))
-            if chat_id:
-                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+            target_chat_id = str(chat_id or tg_cfg.get("chat_id", ""))
+            if target_chat_id:
+                await context.bot.send_message(chat_id=target_chat_id, text=text, parse_mode="Markdown")
         except Exception as e:
             logger.error(f"发送监控消息失败: {e}")
 
@@ -1682,6 +1683,7 @@ def run_bot(cfg: dict):
             text += "\n点一个有货配置，再选机房。"
         else:
             text += "\n当前没有有货配置，但仍可先设定监控条件。"
+        buttons.append([InlineKeyboardButton("取消", callback_data="cancel")])
         await msg.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1741,7 +1743,10 @@ def run_bot(cfg: dict):
                 f"   进度: {task['ordered']}/{task['max_orders']} 单\n\n"
             )
 
-        await update.message.reply_text(text, parse_mode="Markdown")
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚙️ 管理监控", callback_data="watchlist|manage")
+        ]])
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
     async def catalog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user(update.effective_user.id):
@@ -2351,7 +2356,61 @@ def run_bot(cfg: dict):
             plan_code = session["plan_code"]
             all_configs = session["all_configs"]
 
-            if stage == "cfg" and len(parts) >= 4:
+            if stage == "cfgback":
+                buttons = []
+                for idx, cfg in enumerate(all_configs[:20]):
+                    buttons.append([InlineKeyboardButton(
+                        f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                        callback_data=f"watch|cfg|{session_id}|{idx}"
+                    )])
+                buttons.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    f"📡 *选择要监控的配置*\n\n型号: `{plan_code}`",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+
+            elif stage == "dcback":
+                cfg = session.get("selected_cfg")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    return
+                dcs = list(cfg["datacenters"].items())
+                keyboard = []
+                keyboard.append([InlineKeyboardButton("🌐 全部机房", callback_data=f"watch|dc|{session_id}|all")])
+                for dc, status in dcs:
+                    status_cn = format_dc_status(status)
+                    keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"watch|dc|{session_id}|{dc}")])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|cfgback|{session_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel")
+                ])
+                await query.edit_message_text(
+                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif stage == "countback":
+                cfg = session.get("selected_cfg")
+                dc = session.get("selected_dc")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    return
+                dc_display = "全部机房" if dc is None else format_dc(dc)
+                keyboard = [
+                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
+                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
+                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ]
+                await query.edit_message_text(
+                    f"🎯 选择下单数量\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n机房: {dc_display}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif stage == "cfg" and len(parts) >= 4:
                 idx = int(parts[3])
                 if idx < 0 or idx >= len(all_configs):
                     await query.edit_message_text("❌ 配置已过期，请重新 /watch")
@@ -2366,7 +2425,10 @@ def run_bot(cfg: dict):
                 for dc, status in dcs:
                     status_cn = format_dc_status(status)
                     keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"watch|dc|{session_id}|{dc}")])
-                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|cfgback|{session_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel")
+                ])
                 title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
                 if not dcs:
                     title = f"📍 这个配置没有可选机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
@@ -2392,7 +2454,7 @@ def run_bot(cfg: dict):
                     [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
                     [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
                     [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
-                    [InlineKeyboardButton("取消", callback_data="cancel")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ]
                 await query.edit_message_text(
                     f"🎯 选择下单数量\n\n"
@@ -2422,10 +2484,10 @@ def run_bot(cfg: dict):
                     "memory": cfg.get("memory"),
                     "max_orders": session.get("max_orders", 1),
                 }
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("▶️ 确认开始监控", callback_data=f"act|{confirm_id}"),
-                    InlineKeyboardButton("取消", callback_data="cancel"),
-                ]])
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶️ 确认开始监控", callback_data=f"act|{confirm_id}")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|countback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ])
                 await query.edit_message_text(
                     f"📡 确认开始监控\n\n"
                     f"型号: `{plan_code}`\n"
@@ -2435,6 +2497,135 @@ def run_bot(cfg: dict):
                     parse_mode="Markdown",
                     reply_markup=keyboard
                 )
+
+        elif parts[0] == "watchlist":
+            if len(parts) >= 2 and parts[1] == "manage":
+                if not watch_tasks:
+                    await query.edit_message_text("📭 当前没有监控任务")
+                    return
+                keyboard = []
+                for pc, task in watch_tasks.items():
+                    status_icon = "🟢" if task.get("active") else "🔴"
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            f"{status_icon} {pc} ({task.get('ordered', 0)}/{task.get('max_orders', 1)})",
+                            callback_data=f"watchlist|task|{pc}"
+                        )
+                    ])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    "⚙️ 选择要管理的监控任务",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
+
+            if len(parts) >= 3 and parts[1] == "task":
+                plan_code = parts[2]
+                task = watch_tasks.get(plan_code)
+                if not task:
+                    await query.edit_message_text("❌ 监控任务不存在或已删除")
+                    return
+                status = "🟢 监控中" if task.get("active") else "🔴 已暂停"
+                filter_parts = []
+                if task.get("dc"):
+                    filter_parts.append(f"机房={format_dc(task['dc'])}")
+                else:
+                    filter_parts.append("机房=全部机房")
+                if task.get("storage"):
+                    filter_parts.append(f"存储={format_storage(task['storage'])}")
+                if task.get("memory"):
+                    filter_parts.append(f"内存={format_memory(task['memory'])}")
+                action_btn = InlineKeyboardButton(
+                    "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
+                    callback_data=f"watchlist|toggle|{plan_code}"
+                )
+                keyboard = InlineKeyboardMarkup([
+                    [action_btn],
+                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
+                    [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ])
+                await query.edit_message_text(
+                    f"⚙️ 管理监控任务\n\n"
+                    f"{status} `{plan_code}`\n"
+                    f"条件: {', '.join(filter_parts)}\n"
+                    f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+                return
+
+            if len(parts) >= 3 and parts[1] == "toggle":
+                plan_code = parts[2]
+                task = watch_tasks.get(plan_code)
+                if not task:
+                    await query.edit_message_text("❌ 监控任务不存在或已删除")
+                    return
+                task["active"] = not task.get("active", True)
+                save_watch_tasks()
+                if task["active"] and not watch_running:
+                    watch_running = True
+                    asyncio.ensure_future(watch_monitor_loop())
+                status_text = "已启用" if task["active"] else "已暂停"
+                await query.answer(f"{plan_code} {status_text}")
+                parts = ["watchlist", "task", plan_code]
+                task = watch_tasks.get(plan_code)
+                status = "🟢 监控中" if task.get("active") else "🔴 已暂停"
+                filter_parts = []
+                if task.get("dc"):
+                    filter_parts.append(f"机房={format_dc(task['dc'])}")
+                else:
+                    filter_parts.append("机房=全部机房")
+                if task.get("storage"):
+                    filter_parts.append(f"存储={format_storage(task['storage'])}")
+                if task.get("memory"):
+                    filter_parts.append(f"内存={format_memory(task['memory'])}")
+                action_btn = InlineKeyboardButton(
+                    "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
+                    callback_data=f"watchlist|toggle|{plan_code}"
+                )
+                keyboard = InlineKeyboardMarkup([
+                    [action_btn],
+                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
+                    [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ])
+                await query.edit_message_text(
+                    f"⚙️ 管理监控任务\n\n"
+                    f"{status} `{plan_code}`\n"
+                    f"条件: {', '.join(filter_parts)}\n"
+                    f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+                return
+
+            if len(parts) >= 3 and parts[1] == "delete":
+                plan_code = parts[2]
+                task = watch_tasks.get(plan_code)
+                if not task:
+                    await query.edit_message_text("❌ 监控任务不存在或已删除")
+                    return
+                task["active"] = False
+                del watch_tasks[plan_code]
+                save_watch_tasks()
+                await query.answer(f"已删除 {plan_code}")
+                if not watch_tasks:
+                    await query.edit_message_text("📭 当前没有监控任务")
+                    return
+                keyboard = []
+                for pc, t in watch_tasks.items():
+                    status_icon = "🟢" if t.get("active") else "🔴"
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            f"{status_icon} {pc} ({t.get('ordered', 0)}/{t.get('max_orders', 1)})",
+                            callback_data=f"watchlist|task|{pc}"
+                        )
+                    ])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    "⚙️ 选择要管理的监控任务",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
 
         elif parts[0] == "buy" and len(parts) >= 3:
             stage = parts[1]
@@ -2583,6 +2774,7 @@ def run_bot(cfg: dict):
                     "max_orders": action.get("max_orders", 1),
                     "ordered": 0,
                     "active": True,
+                    "chat_id": str(query.message.chat_id),
                     "_last_order_time": {},
                 }
                 save_watch_tasks()
