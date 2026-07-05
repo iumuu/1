@@ -924,9 +924,9 @@ class OVHClient:
         return self.post(f"/dedicated/server/{service_name}/reboot")
 
     def get_payment_url(self, order_id: int) -> str:
-        """获取真实付款入口链接。/me/order/{id}/url 通常是订单展示页，不一定是付款页。"""
+        """获取真实付款入口链接。finalPay 是未付款账单的直接付款页。"""
         zone_lower = self.zone.lower()
-        return f"https://order.eu.ovhcloud.com/en-{zone_lower}/express/#/instant/displayOrder?orderId={order_id}"
+        return f"https://order.eu.ovhcloud.com/en-{zone_lower}/express/#/instant/finalPay?orderId={order_id}"
 
     def delete_cart(self, cart_id: str) -> dict:
         return self.delete(f"/order/cart/{cart_id}")
@@ -1856,6 +1856,7 @@ def run_bot(cfg: dict):
             "delivered": ("✅", "Complete"),
             "delivering": ("🔄", "Being processed"),
             "pendingPayment": ("⏳", "Pending payment"),
+            "notPaid": ("⏳", "Not paid"),
             "validatingPayment": ("🔄", "Validating payment"),
             "pending_debit_validation": ("⏳", "Pending validation"),
             "canceled": ("❌", "Canceled"),
@@ -1921,7 +1922,7 @@ def run_bot(cfg: dict):
                 lines.append(f"到期: {to_bjt(detail['expiration_date'])}")
 
             pay_url = detail.get("payment_url")
-            unpaid = status in ("pendingPayment", "pending_debit_validation")
+            unpaid = status in ("pendingPayment", "pending_debit_validation", "notPaid")
             if pay_url and unpaid:
                 lines.append(f"\n💳 [点击付款]({pay_url})")
 
@@ -2253,6 +2254,7 @@ def run_bot(cfg: dict):
                 "delivered": ("✅", "Complete"),
                 "delivering": ("🔄", "Being processed"),
                 "pendingPayment": ("⏳", "Pending payment"),
+                "notPaid": ("⏳", "Not paid"),
                 "validatingPayment": ("🔄", "Validating payment"),
                 "canceled": ("❌", "Canceled"),
                 "expired": ("💀", "Expired"),
