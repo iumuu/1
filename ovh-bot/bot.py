@@ -1512,7 +1512,7 @@ def run_bot(cfg: dict):
     watch_tasks = {}
     load_watch_tasks()  # 启动时恢复
     pending_actions = {}
-    watch_running = False
+    watch_sessions = {}
     watch_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
 
     async def watch_monitor_loop():
@@ -1595,21 +1595,16 @@ def run_bot(cfg: dict):
             logger.error(f"发送监控消息失败: {e}")
 
     async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """开始监控服务器 - 有货自动下单，可设置下单次数"""
+        """开始监控服务器 - 通过按钮选择配置和机房"""
         if not check_user(update.effective_user.id):
             await update.message.reply_text("⛔ 未授权")
             return
 
         if not context.args:
             await update.message.reply_text(
-                "用法: /watch <planCode> [dc] [存储] [内存] [下单数]\n\n"
-                "示例:\n"
-                "  /watch 26sk10b-v1 fra nvme 1     → 法兰克福 NVMe，下1单后停止\n"
-                "  /watch 26sk10b-v1 nvme 2          → 不限机房 NVMe，下2单后停止\n"
-                "  /watch 26sk10b-v1 fra             → 法兰克福不限存储，默认下1单\n"
-                "  /watch 26sk10b-v1                 → 不限配置，默认下1单\n\n"
-                "💡 默认下1单后自动停止，不会无限下单！\n"
-                "   用 /unwatch 可随时取消监控"
+                "用法: /watch <planCode>\n\n"
+                "示例: /watch ks-1-b\n\n"
+                "然后用按钮选择配置和机房"
             )
             return
 
@@ -1618,81 +1613,41 @@ def run_bot(cfg: dict):
             await update.message.reply_text(f"❌ 无法识别型号: {context.args[0]}\n\n可用名称: ks-1-b, ks-stor, ks-2, rise-2 等")
             return
 
-        extras = list(context.args[1:])
-        dc = None
-        target_storage = None
-        target_memory = None
-        max_orders = 1
+        msg = await update.message.reply_text(f"🔍 正在查询 `{plan_code}` 可监控配置...", parse_mode="Markdown")
+        all_configs = ovh_client.check_availability(plan_code)
+        if not all_configs:
+            await msg.edit_text(f"❌ 未获取到 `{plan_code}` 的可用性数据", parse_mode="Markdown")
+            return
 
-        def is_memory_token(v: str) -> bool:
-            return bool(re.fullmatch(r"\d+[gG]", v) or re.fullmatch(r"\d+[mM]", v))
+        available_cfgs = []
+        for cfg in all_configs:
+            for dc, status in cfg["datacenters"].items():
+                if status not in UNAVAILABLE_STATES:
+                    available_cfgs.append(cfg)
+                    break
 
-        def is_count_token(v: str) -> bool:
-            return v.isdigit()
+        if not available_cfgs:
+            await msg.edit_text(f"😢 `{plan_code}` 当前没有可监控的有货配置", parse_mode="Markdown")
+            return
 
-        def is_storage_token(v: str) -> bool:
-            low = v.lower()
-            return low in ("nvme", "hdd", "ssd", "sas") or bool(re.fullmatch(r"\d+x\d+(nvme|hdd|ssd|sas)?", low))
-
-        # 从后往前解析：count -> memory -> storage -> dc
-        if extras and is_count_token(extras[-1]):
-            max_orders = int(extras.pop())
-        if extras and is_memory_token(extras[-1]):
-            target_memory = extras.pop()
-        if extras and is_storage_token(extras[-1]):
-            target_storage = extras.pop()
-        if extras:
-            dc = extras.pop(0)
-
-        # 兜底：如果第一个参数看起来像存储/内存，也做纠正
-        if dc and is_storage_token(dc):
-            target_storage = dc
-            dc = None
-        if dc and is_memory_token(dc):
-            target_memory = dc
-            dc = None
-        if target_storage and is_count_token(target_storage):
-            max_orders = int(target_storage)
-            target_storage = None
-        if target_memory and is_count_token(target_memory):
-            max_orders = int(target_memory)
-            target_memory = None
-
-        watch_tasks[plan_code] = {
-            "dc": dc,
-            "storage": target_storage,
-            "memory": target_memory,
-            "max_orders": max_orders,
-            "ordered": 0,
-            "active": True,
-            "_last_order_time": {},
+        session_id = str(int(time.time() * 1000))[-10:]
+        watch_sessions[session_id] = {
+            "plan_code": plan_code,
+            "all_configs": all_configs,
+            "selected_fqn": None,
+            "selected_dc": None,
+            "max_orders": 1,
         }
-        save_watch_tasks()
 
-        # 启动后台监控（如果未运行或有恢复的任务）
-        nonlocal watch_running
-        if not watch_running:
-            watch_running = True
-            asyncio.ensure_future(watch_monitor_loop())
+        buttons = []
+        for idx, cfg in enumerate(available_cfgs[:20]):
+            buttons.append([InlineKeyboardButton(
+                f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                callback_data=f"watch|cfg|{session_id}|{idx}"
+            )])
 
-        filter_parts = []
-        if dc:
-            filter_parts.append(f"机房={dc}")
-        if target_storage:
-            filter_parts.append(f"存储={target_storage}")
-        if target_memory:
-            filter_parts.append(f"内存={target_memory}")
-        filter_str = f" ({', '.join(filter_parts)})" if filter_parts else ""
-
-        await update.message.reply_text(
-            f"📡 *开始监控* `{plan_code}`{filter_str}\n\n"
-            f"⏱️ 检查间隔: 10秒\n"
-            f"🎯 下单上限: {max_orders} 单\n"
-            f"📊 已下: 0 单\n\n"
-            f"💡 达到 {max_orders} 单后自动停止\n"
-            f"/unwatch {plan_code} 可随时取消",
-            parse_mode="Markdown",
-        )
+        text = f"📡 *选择要监控的配置*\n\n型号: `{plan_code}`\n\n点一个配置，再选机房。"
+        await msg.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """取消监控"""
@@ -2333,6 +2288,76 @@ def run_bot(cfg: dict):
                 ]])
                 await query.edit_message_text(f"⚠️ 确认重启 {service_name}?", reply_markup=kb)
 
+        elif parts[0] == "watch" and len(parts) >= 3:
+            stage = parts[1]
+            session_id = parts[2]
+            session = watch_sessions.get(session_id)
+            if not session:
+                await query.edit_message_text("❌ 监控会话已过期，请重新 /watch")
+                return
+
+            plan_code = session["plan_code"]
+            all_configs = session["all_configs"]
+
+            if stage == "cfg" and len(parts) >= 4:
+                idx = int(parts[3])
+                if idx < 0 or idx >= len(all_configs):
+                    await query.edit_message_text("❌ 配置已过期，请重新 /watch")
+                    return
+                cfg = all_configs[idx]
+                session["selected_fqn"] = cfg["fqn"]
+                session["selected_cfg"] = cfg
+
+                dcs = []
+                for dc, status in cfg["datacenters"].items():
+                    if status not in UNAVAILABLE_STATES:
+                        dcs.append((dc, status))
+                if not dcs:
+                    await query.edit_message_text("😢 该配置当前没有可监控的机房，请重新 /watch")
+                    return
+
+                keyboard = []
+                for dc, status in dcs:
+                    keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"watch|dc|{session_id}|{dc}")])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif stage == "dc" and len(parts) >= 4:
+                dc = parts[3]
+                cfg = session.get("selected_cfg")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    return
+                session["selected_dc"] = dc
+
+                confirm_id = str(int(time.time() * 1000))[-10:]
+                pending_actions[confirm_id] = {
+                    "type": "watch_start",
+                    "plan_code": plan_code,
+                    "fqn": cfg["fqn"],
+                    "dc": dc,
+                    "storage": cfg.get("storage"),
+                    "memory": cfg.get("memory"),
+                    "max_orders": session.get("max_orders", 1),
+                }
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("▶️ 确认开始监控", callback_data=f"act|{confirm_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel"),
+                ]])
+                await query.edit_message_text(
+                    f"📡 确认开始监控\n\n"
+                    f"型号: `{plan_code}`\n"
+                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"机房: {dc}\n"
+                    f"下单上限: {session.get('max_orders', 1)}",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+
         elif parts[0] == "act" and len(parts) >= 2:
             action_id = parts[1]
             action = pending_actions.pop(action_id, None)
@@ -2340,7 +2365,32 @@ def run_bot(cfg: dict):
                 await query.edit_message_text("❌ 操作已过期，请重新发起")
                 return
 
-            if action["type"] == "reinstall":
+            if action["type"] == "watch_start":
+                plan_code = action["plan_code"]
+                watch_tasks[plan_code] = {
+                    "dc": action.get("dc"),
+                    "storage": action.get("storage"),
+                    "memory": action.get("memory"),
+                    "max_orders": action.get("max_orders", 1),
+                    "ordered": 0,
+                    "active": True,
+                    "_last_order_time": {},
+                }
+                save_watch_tasks()
+                if not watch_running:
+                    watch_running = True
+                    asyncio.ensure_future(watch_monitor_loop())
+                await query.edit_message_text(
+                    f"📡 *开始监控* `{plan_code}`\n\n"
+                    f"📍 机房: {action.get('dc')}\n"
+                    f"📦 配置: {format_memory(action.get('memory'))} + {format_storage(action.get('storage'))}\n"
+                    f"🎯 下单上限: {action.get('max_orders', 1)}\n"
+                    f"📊 已下: 0 单\n\n"
+                    f"💡 达到上限后自动停止",
+                    parse_mode="Markdown"
+                )
+
+            elif action["type"] == "reinstall":
                 service_name = action["service_name"]
                 template = action["template"]
                 hostname = action.get("hostname")
