@@ -1662,17 +1662,18 @@ def run_bot(cfg: dict):
                     available_cfgs.append(cfg)
                     break
 
+        source_cfgs = available_cfgs if available_cfgs else all_configs
         session_id = str(int(time.time() * 1000))[-10:]
         watch_sessions[session_id] = {
             "plan_code": plan_code,
             "all_configs": all_configs,
+            "display_configs": source_cfgs,
             "selected_fqn": None,
             "selected_dc": None,
             "max_orders": 1,
         }
 
         buttons = []
-        source_cfgs = available_cfgs if available_cfgs else all_configs
         for idx, cfg in enumerate(source_cfgs[:20]):
             buttons.append([InlineKeyboardButton(
                 f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
@@ -2362,10 +2363,11 @@ def run_bot(cfg: dict):
 
             plan_code = session["plan_code"]
             all_configs = session["all_configs"]
+            display_configs = session.get("display_configs", all_configs)
 
             if stage == "cfgback":
                 buttons = []
-                for idx, cfg in enumerate(all_configs[:20]):
+                for idx, cfg in enumerate(display_configs[:20]):
                     buttons.append([InlineKeyboardButton(
                         f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
                         callback_data=f"watch|cfg|{session_id}|{idx}"
@@ -2419,10 +2421,10 @@ def run_bot(cfg: dict):
 
             elif stage == "cfg" and len(parts) >= 4:
                 idx = int(parts[3])
-                if idx < 0 or idx >= len(all_configs):
+                if idx < 0 or idx >= len(display_configs):
                     await query.edit_message_text("❌ 配置已过期，请重新 /watch")
                     return
-                cfg = all_configs[idx]
+                cfg = display_configs[idx]
                 session["selected_fqn"] = cfg["fqn"]
                 session["selected_cfg"] = cfg
 
