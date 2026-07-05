@@ -1527,7 +1527,8 @@ def run_bot(cfg: dict):
         if not any(s not in UNAVAILABLE_STATES for cfg in all_configs for s in cfg["datacenters"].values()):
             text += "😢 当前所有配置均无货"
 
-        reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+        buttons.append([InlineKeyboardButton("取消", callback_data="cancel")])
+        reply_markup = InlineKeyboardMarkup(buttons)
         await msg.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
     # ---- 内置监控器 ----
@@ -1785,9 +1786,10 @@ def run_bot(cfg: dict):
                 f"   进度: {task['ordered']}/{task['max_orders']} 单\n\n"
             )
 
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("⚙️ 管理监控", callback_data="watchlist|manage")
-        ]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️ 管理监控", callback_data="watchlist|manage")],
+            [InlineKeyboardButton("取消", callback_data="cancel")],
+        ])
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
     async def catalog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1819,7 +1821,8 @@ def run_bot(cfg: dict):
         if len(plans) > 30:
             text += f"\n... 还有 {len(plans) - 30} 个型号"
 
-        await msg.edit_text(text, parse_mode="Markdown")
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel")]])
+        await msg.edit_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
     async def pay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user(update.effective_user.id):
@@ -1831,9 +1834,11 @@ def run_bot(cfg: dict):
         try:
             order_id = int(context.args[0])
             url = ovh_client.get_payment_url(order_id)
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel")]])
             await update.message.reply_text(
                 f"💳 订单 `{order_id}` 付款链接:\n\n{url}\n\n⚠️ 请尽快付款！",
                 parse_mode="Markdown",
+                reply_markup=keyboard,
             )
         except Exception as e:
             await update.message.reply_text(f"❌ 获取付款链接失败: {e}")
@@ -1859,7 +1864,7 @@ def run_bot(cfg: dict):
 
         if not context.args:
             try:
-                await update.message.reply_text("⏳ 正在查询订单...")
+                msg = await update.message.reply_text("⏳ 正在查询订单...")
                 orders, total = ovh_client.list_recent_orders(0, 10)
                 if not orders:
                     await update.message.reply_text("📭 没有找到订单")
@@ -1878,11 +1883,12 @@ def run_bot(cfg: dict):
                 keyboard = []
                 if total > 10:
                     keyboard.append([InlineKeyboardButton("▶️ 下一页", callback_data="orders|p|1")])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
 
-                await update.message.reply_text(
+                await msg.edit_text(
                     "\n".join(lines),
                     parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             except Exception as e:
                 await update.message.reply_text(f"❌ 查询失败: {e}")
@@ -1895,7 +1901,7 @@ def run_bot(cfg: dict):
             return
 
         try:
-            await update.message.reply_text(f"⏳ 正在查询订单 `{order_id}`...", parse_mode="Markdown")
+            msg = await update.message.reply_text(f"⏳ 正在查询订单 `{order_id}`...", parse_mode="Markdown")
 
             detail = ovh_client.get_order_details(order_id)
             status = detail.get("status", "unknown")
@@ -1918,7 +1924,8 @@ def run_bot(cfg: dict):
             if order_url:
                 lines.append(f"📄 [OVH 订单页面]({order_url})")
 
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel")]])
+            await msg.edit_text("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:
             await update.message.reply_text(f"❌ 查询失败: {e}")
 
@@ -1969,6 +1976,7 @@ def run_bot(cfg: dict):
                 ])
 
             lines.append("💡 点按钮即可安装系统或重启服务器")
+            keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
             await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
             await msg.edit_text(f"❌ 获取失败: {e}")
@@ -1984,7 +1992,8 @@ def run_bot(cfg: dict):
                 return
             text = "🔑 *OVH 预设 SSH 密钥*\n\n" + "\n".join(f"• `{k}`" for k in keys)
             text += "\n\n💡 安装系统请用 /servers 按钮流程选择密钥"
-            await update.message.reply_text(text, parse_mode="Markdown")
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel")]])
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:
             await update.message.reply_text(f"❌ 获取密钥失败: {e}")
 
@@ -2261,11 +2270,12 @@ def run_bot(cfg: dict):
                 row.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"orders|p|{page+1}"))
             if row:
                 keyboard.append(row)
+            keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
 
             await query.edit_message_text(
                 "\n".join(lines),
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
         elif parts[0] == "srv" and len(parts) >= 3:
