@@ -277,12 +277,19 @@ def storage_matches(storage_raw: str, target: str) -> bool:
       - "hdd" → 匹配任何 HDD/SAS
       - "2x500nvme" → 精确匹配 2x500...nvme
       - "2x4hdd" → 匹配 2x4000sa (2x4TB HDD)
+      - "softraid-2x450nvme" → 完整 OVH 存储配置精确匹配
     """
     if not target or not storage_raw:
         return True
 
-    s = storage_raw.lower().replace(" ", "")
-    t = target.lower().replace(" ", "").replace("gb", "").replace("tb", "")
+    raw = storage_raw.lower().replace(" ", "")
+    tgt = target.lower().replace(" ", "")
+    s = raw.replace("gb", "").replace("tb", "")
+    t = tgt.replace("gb", "").replace("tb", "")
+
+    # 完整 OVH storage 配置，走标准化精确匹配
+    if "softraid" in tgt or "raid" in tgt:
+        return OVHClient._standardize(raw) == OVHClient._standardize(tgt)
 
     # 简单类型匹配
     if t == "nvme":
@@ -291,27 +298,25 @@ def storage_matches(storage_raw: str, target: str) -> bool:
         return ("nvme" not in s) and ("sa" in s)
 
     # 精确匹配: 2x500nvme → 在原始 storage 中查找
-    if re.match(r'\d+x\d+nvme', t):
-        # 提取数字部分: 2x500nvme → 2x500
-        m = re.match(r'(\d+x\d+)nvme', t)
+    if re.match(r'\d+x\d+nvme$', t):
+        m = re.match(r'(\d+x\d+)nvme$', t)
         if m:
             prefix = m.group(1)
             return prefix in s and "nvme" in s
         return t in s
 
     # HDD 精确匹配: 2x4hdd → 查找 2x4000sa (4TB = 4000)
-    if re.match(r'\d+x\d+hdd', t):
-        m = re.match(r'(\d+)x(\d+)hdd', t)
+    if re.match(r'\d+x\d+hdd$', t):
+        m = re.match(r'(\d+)x(\d+)hdd$', t)
         if m:
             count = m.group(1)
             tb_val = int(m.group(2))
-            # TB → 期望的数字: 4TB = 4000, 2TB = 2000
             sa_val = str(tb_val * 1000)
             return f"{count}x{sa_val}" in s and "sa" in s
         return t in s
 
-    # 兜底: 子串匹配
-    return t in s
+    # 无法解析时不放行，避免 2x450nvme 错落到其它存储
+    return OVHClient._standardize(raw) == OVHClient._standardize(tgt)
 
 
 def memory_matches(memory_raw: str, target: str) -> bool:
@@ -1013,6 +1018,24 @@ class OVHClient:
                 effective_options = self._find_addon_options(
                     plan_code, chosen["memory"], chosen["storage"]
                 )
+
+            # 硬校验：指定配置必须能找到对应硬件选项，避免 OVH 默认落到其它内存/硬盘
+            std_options = {self._standardize(o) for o in (effective_options or [])}
+            expected_parts = []
+            if chosen.get("memory") and chosen["memory"] != "N/A":
+                expected_parts.append(("内存", chosen["memory"]))
+            if chosen.get("storage") and chosen["storage"] != "N/A":
+                expected_parts.append(("硬盘", chosen["storage"]))
+            missing_parts = [label for label, value in expected_parts if self._standardize(value) not in std_options]
+            if missing_parts:
+                result["error"] = (
+                    f"配置选项匹配失败，已阻止下单，避免买错配置。"
+                    f"缺失: {', '.join(missing_parts)}；"
+                    f"目标: {chosen['memory_display']} + {chosen['storage_display']}；"
+                    f"已找到选项: {', '.join(effective_options or []) or '无'}"
+                )
+                result["elapsed"] = round(time.time() - start_time, 2)
+                return result
 
             # 步骤 1: 创建购物车
             cart = self.create_cart()
