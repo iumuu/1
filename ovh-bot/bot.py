@@ -320,22 +320,33 @@ def memory_matches(memory_raw: str, target: str) -> bool:
     支持的 target:
       - None/"" → 不限制
       - "32g" / "32gb" → 匹配 32GB
-      - "64g" / "64gb" → 匹配 64GB
+      - "ram-32g-ecc-2133" → 精确解析并匹配 32GB
     """
     if not target or not memory_raw:
         return True
 
-    m = re.search(r'ram-(\d+)', memory_raw.lower())
-    if not m:
-        return False
+    raw = memory_raw.lower().replace(" ", "")
+    tgt = target.lower().replace(" ", "")
 
-    mem_size = int(m.group(1))
-    t = target.lower().replace(" ", "").replace("gb", "").replace("g", "")
-    if t.isdigit():
-        target_size = int(t)
-        # "32g" → 目标 32GB → ram-32g 或 ram-32000m → 都=32
-        return mem_size == target_size
-    return True
+    raw_m = re.search(r'ram-(\d+)', raw)
+    if not raw_m:
+        return False
+    raw_size = int(raw_m.group(1))
+
+    # 优先解析完整 OVH 内存配置，如 ram-32g-ecc-2133 / ram-64g-ecc-2400
+    tgt_m = re.search(r'ram-(\d+)', tgt)
+    if tgt_m:
+        return raw_size == int(tgt_m.group(1))
+
+    # 解析简写，如 32g / 32gb / 64
+    simple_m = re.search(r'^(\d+)(?:g|gb)?$', tgt)
+    if simple_m:
+        return raw_size == int(simple_m.group(1))
+
+    # 无法解析时不要放行，最多允许标准化后的精确包含匹配
+    tgt_norm = tgt.replace("gb", "g")
+    raw_norm = raw.replace("gb", "g")
+    return tgt_norm in raw_norm
 
 
 # ============================================================
