@@ -1373,10 +1373,24 @@ def run_bot(cfg: dict):
             await msg.edit_text(f"❌ 未获取到 `{plan_code}` 的可用性数据", parse_mode="Markdown")
             return
 
+        available_cfgs = []
+        for cfg in all_configs:
+            if any(status not in UNAVAILABLE_STATES for status in cfg["datacenters"].values()):
+                available_cfgs.append(cfg)
+
+        if not available_cfgs:
+            await msg.edit_text(
+                f"❌ `{plan_code}` 当前没有任何有货配置，无法抢购。\n\n"
+                f"💡 请用 /watch 先设定监控，等有货后自动下单。",
+                parse_mode="Markdown"
+            )
+            return
+
         session_id = str(int(time.time() * 1000))[-10:]
         buy_sessions[session_id] = {
             "plan_code": plan_code,
             "all_configs": all_configs,
+            "display_configs": available_cfgs,
             "selected_cfg": None,
             "selected_dc": None,
             "target_storage": None,
@@ -1385,13 +1399,13 @@ def run_bot(cfg: dict):
         }
 
         buttons = []
-        for idx, cfg in enumerate(all_configs[:20]):
+        for idx, cfg in enumerate(available_cfgs[:20]):
             buttons.append([InlineKeyboardButton(
                 f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
                 callback_data=f"buy|cfg|{session_id}|{idx}"
             )])
 
-        text = f"🛒 *选择要抢购的配置*\n\n型号: `{plan_code}`\n\n点一个配置，再选机房。"
+        text = f"🛒 *选择要抢购的配置*\n\n型号: `{plan_code}`\n\n只显示当前有货配置。"
         buttons.append([InlineKeyboardButton("取消", callback_data="cancel")])
         await msg.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -1662,7 +1676,7 @@ def run_bot(cfg: dict):
                     available_cfgs.append(cfg)
                     break
 
-        source_cfgs = available_cfgs if available_cfgs else all_configs
+        source_cfgs = all_configs
         session_id = str(int(time.time() * 1000))[-10:]
         watch_sessions[session_id] = {
             "plan_code": plan_code,
@@ -1681,10 +1695,7 @@ def run_bot(cfg: dict):
             )])
 
         text = f"📡 *选择要监控的配置*\n\n型号: `{plan_code}`\n"
-        if available_cfgs:
-            text += "\n点一个有货配置，再选机房。"
-        else:
-            text += "\n当前没有有货配置，但仍可先设定监控条件。"
+        text += "\n监控会列出全部配置，无货配置也可以先设定，等有货后自动下单。"
         buttons.append([InlineKeyboardButton("取消", callback_data="cancel")])
         await msg.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -2646,10 +2657,11 @@ def run_bot(cfg: dict):
 
             plan_code = session["plan_code"]
             all_configs = session["all_configs"]
+            display_configs = session.get("display_configs", all_configs)
 
             if stage == "cfgback":
                 buttons = []
-                for idx, cfg in enumerate(all_configs[:20]):
+                for idx, cfg in enumerate(display_configs[:20]):
                     buttons.append([InlineKeyboardButton(
                         f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
                         callback_data=f"buy|cfg|{session_id}|{idx}"
@@ -2666,7 +2678,10 @@ def run_bot(cfg: dict):
                 if not cfg:
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /buy")
                     return
-                dcs = list(cfg["datacenters"].items())
+                dcs = [(dc, status) for dc, status in cfg["datacenters"].items() if status not in UNAVAILABLE_STATES]
+                if not dcs:
+                    await query.edit_message_text("❌ 这个配置当前已无货，请重新 /buy 查询最新库存")
+                    return
                 keyboard = []
                 for dc, status in dcs:
                     status_cn = format_dc_status(status)
@@ -2702,13 +2717,16 @@ def run_bot(cfg: dict):
 
             elif stage == "cfg" and len(parts) >= 4:
                 idx = int(parts[3])
-                if idx < 0 or idx >= len(all_configs):
+                if idx < 0 or idx >= len(display_configs):
                     await query.edit_message_text("❌ 配置已过期，请重新 /buy")
                     return
-                cfg = all_configs[idx]
+                cfg = display_configs[idx]
                 session["selected_cfg"] = cfg
 
-                dcs = list(cfg["datacenters"].items())
+                dcs = [(dc, status) for dc, status in cfg["datacenters"].items() if status not in UNAVAILABLE_STATES]
+                if not dcs:
+                    await query.edit_message_text("❌ 这个配置当前已无货，请重新 /buy 查询最新库存")
+                    return
                 keyboard = []
                 for dc, status in dcs:
                     status_cn = format_dc_status(status)
