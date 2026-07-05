@@ -2277,13 +2277,16 @@ def run_bot(cfg: dict):
         """处理内联按钮回调 - 支持带存储类型的下单"""
         nonlocal watch_running
         query = update.callback_query
-        await query.answer()
 
         if not check_user(query.from_user.id):
             await query.answer("⛔ 未授权", show_alert=True)
             return
 
         data = query.data
+        if data.startswith("act|"):
+            await query.answer("正在处理，请稍等...", cache_time=0)
+        else:
+            await query.answer()
         parts = data.split("|")
 
         if parts[0] == "buy" and len(parts) >= 3 and parts[1] == "preset":
@@ -2934,10 +2937,12 @@ def run_bot(cfg: dict):
 
         elif parts[0] == "act" and len(parts) >= 2:
             action_id = parts[1]
-            action = pending_actions.pop(action_id, None)
+            action = pending_actions.get(action_id)
             if not action:
                 await query.edit_message_text("❌ 操作已过期，请重新发起")
                 return
+            if action.get("type") != "watch_start":
+                pending_actions.pop(action_id, None)
 
             if action["type"] == "buy_start":
                 plan_code = action["plan_code"]
@@ -2992,18 +2997,23 @@ def run_bot(cfg: dict):
                     "_last_order_time": {},
                 }
                 save_watch_tasks()
-                if not watch_running:
-                    watch_running = True
-                    asyncio.ensure_future(watch_monitor_loop())
-                await query.edit_message_text(
+                text = (
                     f"📡 *开始监控* `{plan_code}`\n\n"
                     f"📍 机房: {format_dc(action.get('dc')) if action.get('dc') else '全部机房'}\n"
                     f"📦 配置: {format_memory(action.get('memory'))} + {format_storage(action.get('storage'))}\n"
                     f"🎯 下单上限: {action.get('max_orders', 1)}\n"
                     f"📊 已下: 0 单\n\n"
-                    f"💡 达到上限后自动停止",
-                    parse_mode="Markdown"
+                    f"💡 达到上限后自动停止"
                 )
+                try:
+                    await query.edit_message_text(text, parse_mode="Markdown")
+                except Exception as e:
+                    logger.warning(f"编辑监控确认消息失败，改发新消息: {e}")
+                    await query.message.reply_text(text, parse_mode="Markdown")
+                pending_actions.pop(action_id, None)
+                if not watch_running:
+                    watch_running = True
+                    asyncio.ensure_future(watch_monitor_loop())
 
             elif action["type"] == "reinstall":
                 service_name = action["service_name"]
