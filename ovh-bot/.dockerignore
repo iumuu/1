@@ -1,0 +1,10 @@
+.env
+config.toml
+data/
+__pycache__/
+*.py[cod]
+*.log
+.git/
+.venv/
+venv/
+*.zip

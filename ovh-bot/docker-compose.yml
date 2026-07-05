@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   ovh-bot:
-    image: gvddfdf/ovh-bot:latest
+    image: ${DOCKER_IMAGE:-gvddfdf/ovh-bot:latest}
     container_name: ovh-bot
     restart: unless-stopped
     environment:
@@ -13,6 +13,7 @@ services:
       - OVH_ZONE=${OVH_ZONE:-IE}
       - TG_BOT_TOKEN=${TG_BOT_TOKEN}
       - TG_ALLOWED_USERS=${TG_ALLOWED_USERS}
+      - TG_ALLOW_ALL_USERS=${TG_ALLOW_ALL_USERS:-false}
       - TG_CHAT_ID=${TG_CHAT_ID}
     # 也可以用配置文件（二选一）
     # volumes:
@@ -20,7 +21,7 @@ services:
 
   # 可选：监控模式
   # ovh-monitor:
-  #   image: gvddfdf/ovh-bot:latest
+  #   image: ${DOCKER_IMAGE:-gvddfdf/ovh-bot:latest}
   #   container_name: ovh-monitor
   #   restart: unless-stopped
   #   environment:
@@ -31,5 +32,6 @@ services:
   #     - OVH_ZONE=${OVH_ZONE:-IE}
   #     - TG_BOT_TOKEN=${TG_BOT_TOKEN}
   #     - TG_ALLOWED_USERS=${TG_ALLOWED_USERS}
+  #     - TG_ALLOW_ALL_USERS=${TG_ALLOW_ALL_USERS:-false}
   #     - TG_CHAT_ID=${TG_CHAT_ID}
   #   command: ["python3", "monitor.py", "ks-1-b", "ks-stor"]

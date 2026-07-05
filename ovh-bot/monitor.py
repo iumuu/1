@@ -12,6 +12,7 @@ OVH 服务器可用性监控脚本 v2
 """
 
 import json
+import argparse
 import logging
 import os
 import re
@@ -34,6 +35,20 @@ logger = logging.getLogger("ovh-monitor")
 CONFIG_PATH = Path(__file__).parent / "config.toml"
 
 
+def parse_args(argv=None):
+    """解析独立监控脚本参数。"""
+    parser = argparse.ArgumentParser(description="OVH 服务器可用性监控脚本 v2")
+    parser.add_argument("plan_codes", nargs="*", help="要监控的服务器 planCode 或友好名称")
+    parser.add_argument("--interval", type=int, help="检查间隔（秒）")
+    parser.add_argument("--dc", "--datacenter", dest="datacenter", help="只监控指定数据中心")
+    parser.add_argument("--auto-buy", action="store_true", help="发现有货后自动下单")
+    parser.add_argument("--notify-only", action="store_true", help="只通知，不自动下单")
+    args = parser.parse_args(argv)
+    if args.auto_buy and args.notify_only:
+        parser.error("--auto-buy 和 --notify-only 不能同时使用")
+    return args
+
+
 class AvailabilityMonitor:
     """OVH 服务器可用性监控 v2 - 多配置支持"""
 
@@ -44,7 +59,7 @@ class AvailabilityMonitor:
                            os.environ.get("TG_CHAT_ID", ""))
         self.interval = cfg.get("monitor", {}).get("interval", 10)
         self.watch_list = cfg.get("monitor", {}).get("watch_list", [])
-        self.auto_buy = cfg.get("monitor", {}).get("auto_buy", True)
+        self.auto_buy = cfg.get("monitor", {}).get("auto_buy", False)
         self.default_dc = (cfg.get("monitor", {}).get("datacenter") or
                            cfg.get("defaults", {}).get("datacenter", ""))
 
@@ -169,6 +184,8 @@ class AvailabilityMonitor:
                             plan_code=plan_code,
                             server_type=server_type,
                             datacenter=dc,
+                            target_storage=storage if storage != "N/A" else None,
+                            target_memory=memory if memory != "N/A" else None,
                         )
 
                         if result["success"]:
@@ -229,14 +246,21 @@ class AvailabilityMonitor:
 
 
 if __name__ == "__main__":
+    args = parse_args()
     cfg = load_config()
+    cfg.setdefault("monitor", {})
 
     # 支持命令行参数指定监控的服务器
-    watch_list = sys.argv[1:]
-    if watch_list:
-        if "monitor" not in cfg:
-            cfg["monitor"] = {}
-        cfg["monitor"]["watch_list"] = watch_list
+    if args.plan_codes:
+        cfg["monitor"]["watch_list"] = args.plan_codes
+    if args.interval is not None:
+        cfg["monitor"]["interval"] = args.interval
+    if args.datacenter:
+        cfg["monitor"]["datacenter"] = args.datacenter
+    if args.auto_buy:
+        cfg["monitor"]["auto_buy"] = True
+    if args.notify_only:
+        cfg["monitor"]["auto_buy"] = False
 
     monitor = AvailabilityMonitor(cfg)
     monitor.run()

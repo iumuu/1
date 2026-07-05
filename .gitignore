@@ -3,3 +3,7 @@ __pycache__/
 config.toml
 deploy.sh
 *.env
+.env
+ovh-bot/data/
+ovh-bot/.env
+ovh-bot/config.toml
