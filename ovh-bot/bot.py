@@ -2325,10 +2325,8 @@ def run_bot(cfg: dict):
                         keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"watch|dc|{session_id}|{dc}")])
                     title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
                 else:
-                    # 当前没货也允许继续设定监控条件
-                    session["selected_dc"] = None
-                    keyboard.append([InlineKeyboardButton("继续设置监控数量", callback_data=f"watch|count|{session_id}|1")])
-                    title = f"📍 当前这个配置暂时没货\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n仍可继续设置监控条件"
+                    keyboard.append([InlineKeyboardButton("查看所有机房", callback_data=f"watch|dcall|{session_id}")])
+                    title = f"📍 当前这个配置暂时没货\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n仍可继续选择机房后设置监控数量"
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
                     title,
@@ -2336,25 +2334,18 @@ def run_bot(cfg: dict):
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
-            elif stage == "dc" and len(parts) >= 4:
-                dc = parts[3]
+            elif stage == "dcall" and len(parts) >= 3:
                 cfg = session.get("selected_cfg")
                 if not cfg:
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
-                session["selected_dc"] = dc
-
-                keyboard = [
-                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
-                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
-                    [InlineKeyboardButton("取消", callback_data="cancel")],
-                ]
+                keyboard = []
+                for dc, status in cfg["datacenters"].items():
+                    if status not in UNAVAILABLE_STATES:
+                        keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"watch|dc|{session_id}|{dc}")])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
-                    f"🎯 选择下单数量\n\n"
-                    f"型号: `{plan_code}`\n"
-                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc}",
+                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -2365,7 +2356,7 @@ def run_bot(cfg: dict):
                 cfg = session.get("selected_cfg")
                 dc = session.get("selected_dc")
                 if not cfg or not dc:
-                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    await query.edit_message_text("❌ 会话状态丢失，请先选择机房")
                     return
                 confirm_id = str(int(time.time() * 1000))[-10:]
                 pending_actions[confirm_id] = {
@@ -2420,9 +2411,8 @@ def run_bot(cfg: dict):
                         keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"buy|dc|{session_id}|{dc}")])
                     title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
                 else:
-                    session["selected_dc"] = None
-                    keyboard.append([InlineKeyboardButton("继续设置下单数量", callback_data=f"buy|count|{session_id}|1")])
-                    title = f"📍 当前这个配置暂时没货\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n仍可继续设置抢购条件"
+                    keyboard.append([InlineKeyboardButton("查看所有机房", callback_data=f"buy|dcall|{session_id}")])
+                    title = f"📍 当前这个配置暂时没货\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n仍可继续选择机房后设置抢购数量"
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
                     title,
@@ -2434,7 +2424,7 @@ def run_bot(cfg: dict):
                 dc = parts[3]
                 cfg = session.get("selected_cfg")
                 if not cfg:
-                    await query.edit_message_text("❌ 会话状态丢失，请重新 /buy")
+                    await query.edit_message_text("❌ 会话状态丢失，请先选择配置")
                     return
                 session["selected_dc"] = dc
 
@@ -2459,7 +2449,7 @@ def run_bot(cfg: dict):
                 cfg = session.get("selected_cfg")
                 dc = session.get("selected_dc")
                 if not cfg or not dc:
-                    await query.edit_message_text("❌ 会话状态丢失，请重新 /buy")
+                    await query.edit_message_text("❌ 会话状态丢失，请先选择机房")
                     return
                 confirm_id = str(int(time.time() * 1000))[-10:]
                 pending_actions[confirm_id] = {
