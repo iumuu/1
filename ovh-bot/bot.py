@@ -1564,9 +1564,10 @@ def run_bot(cfg: dict):
                                     continue
 
                             stor_str = f" {task['storage']}" if task.get("storage") else ""
+                            dc_display = format_dc(chosen['datacenter'])
                             await _send_msg(
                                 f"🔥 *监控发现 `{plan_code}` 有货！*\n"
-                                f"📍 {chosen['datacenter']} | {chosen['memory_display']} + {chosen['storage_display']}\n"
+                                f"📍 {dc_display} | {chosen['memory_display']} + {chosen['storage_display']}\n"
                                 f"🚀 正在自动下单... ({task['ordered']+1}/{task['max_orders']})"
                             )
 
@@ -1584,12 +1585,28 @@ def run_bot(cfg: dict):
                                 last_order_time[cooldown_key] = now
                                 task["_last_order_time"] = last_order_time
                                 save_watch_tasks()
-                                text = _format_buy_result(result)
-                                text += f"\n\n📊 监控进度: 已下 {task['ordered']}/{task['max_orders']} 单"
+
+                                # 精简的成功消息
+                                text = f"✅ *监控自动下单成功！*\n\n"
+                                text += f"📦 服务器: `{result['plan_code']}`\n"
+                                text += f"🏗️ 机房: {format_dc(result['datacenter'])}\n"
+                                ci = result.get("config_info")
+                                if ci:
+                                    text += f"💾 配置: {ci['memory_display']} + {ci['storage_display']}\n"
+                                if result.get("price"):
+                                    p = result["price"]
+                                    text += f"💰 价格: {p.get('withTax', '?')} {p.get('currencyCode', 'EUR')}\n"
+                                if result["order_id"]:
+                                    text += f"📋 订单号: `{result['order_id']}`\n"
+                                if result["payment_url"]:
+                                    text += f"💳 付款链接: {result['payment_url']}\n"
+                                text += f"\n📊 监控进度: 已下 {task['ordered']}/{task['max_orders']} 单"
                                 if task["ordered"] >= task["max_orders"]:
                                     task["active"] = False
                                     save_watch_tasks()
-                                    text += "\n🎯 已达上限，监控自动停止"
+                                    text += "\n🎯 已达上限，监控自动停止\n\n⚠️ 请尽快手动付款以锁定订单！"
+                                else:
+                                    text += "\n\n⚠️ 请尽快手动付款以锁定订单！"
                             else:
                                 text = f"❌ 监控自动下单失败: `{plan_code}`\n{result['error']}"
 
