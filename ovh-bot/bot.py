@@ -802,15 +802,16 @@ class OVHClient:
 
         return result
 
-    def list_recent_orders(self, count: int = 10) -> list:
-        """获取最近的订单列表 (含状态和价格)"""
+    def list_recent_orders(self, offset: int = 0, count: int = 10) -> tuple:
+        """获取订单列表 (分页) - 返回 (orders_list, total_count)"""
         try:
             orders = self.get("/me/order")
             if isinstance(orders, list):
+                total = len(orders)
                 orders_sorted = sorted(orders, reverse=True)
-                recent = orders_sorted[:count]
+                page = orders_sorted[offset:offset + count]
                 result = []
-                for oid in recent:
+                for oid in page:
                     entry = {"order_id": oid, "status": "?", "date": None, "price_text": None}
                     try:
                         info = self.get(f"/me/order/{oid}")
@@ -819,16 +820,72 @@ class OVHClient:
                         entry["price_text"] = pwt.get("text")
                     except Exception:
                         pass
-                    # 状态单独获取
                     try:
                         entry["status"] = self.get(f"/me/order/{oid}/status")
                     except Exception:
                         pass
                     result.append(entry)
-                return result
+                return result, total
         except Exception:
             pass
-        return []
+        return [], 0
+
+    # ---- 服务器管理 ----
+    def list_servers(self) -> list:
+        """列出所有独立服务器"""
+        try:
+            names = self.get("/dedicated/server")
+            result = []
+            for name in names:
+                try:
+                    info = self.get(f"/dedicated/server/{name}")
+                    result.append({
+                        "name": name,
+                        "commercial_range": info.get("commercialRange", ""),
+                        "os": info.get("os", ""),
+                        "state": info.get("state", ""),
+                        "power_state": info.get("powerState", ""),
+                        "datacenter": info.get("datacenter", ""),
+                        "ip": info.get("ip", ""),
+                        "reverse": info.get("reverse", ""),
+                        "monitoring": info.get("monitoring"),
+                    })
+                except Exception:
+                    result.append({"name": name, "commercial_range": "?", "os": "?", "state": "?"})
+            return result
+        except Exception:
+            return []
+
+    def get_server_templates(self, service_name: str) -> list:
+        """获取服务器可安装的 OS 模板列表"""
+        try:
+            r = self.get(f"/dedicated/server/{service_name}/install/compatibleTemplates")
+            templates = []
+            if isinstance(r, dict):
+                for category, tlist in r.items():
+                    for t in tlist:
+                        templates.append(t)
+            return sorted(templates)
+        except Exception:
+            return []
+
+    def get_install_status(self, service_name: str) -> str:
+        """获取当前安装状态"""
+        try:
+            return self.get(f"/dedicated/server/{service_name}/install/status")
+        except Exception as e:
+            return str(e)
+
+    def reinstall_server(self, service_name: str, template: str, hostname: str = None) -> dict:
+        """重装系统 - 返回 task 信息"""
+        body = {"operatingSystem": template}
+        if hostname:
+            body["customizations"] = {"hostname": hostname}
+        return self.post(f"/dedicated/server/{service_name}/reinstall", **body)
+
+    def reboot_server(self, service_name: str) -> dict:
+        """硬重启服务器"""
+        return self.post(f"/dedicated/server/{service_name}/reboot")
 
     def get_payment_url(self, order_id: int) -> str:
         """获取订单付款链接"""
@@ -1222,9 +1279,14 @@ def run_bot(cfg: dict):
             "/watchlist — 查看当前监控列表\n\n"
             "💳 *订单类:*\n"
             "/pay orderId — 获取付款链接\n"
-            "/status — 查看最近 10 笔订单\n"
+            "/status — 查看最近订单 (可翻页)\n"
             "/status orderId — 查看订单详情\n"
             "/catalog — 查看服务器目录\n\n"
+            "🖥️ *服务器管理:*\n"
+            "/servers — 列出所有独立服务器\n"
+            "/reinstall <序号> — 查看可用系统\n"
+            "/reinstall <序号> <系统名> — 安装系统\n"
+            "/reboot <序号> — 重启服务器\n\n"
             "💡 直接转发 OVH 服务器信息也可自动下单！\n"
             f"🌐 当前区域: {ovh_client.zone} / {ovh_client.subsidiary}",
             parse_mode="Markdown",
@@ -1422,6 +1484,7 @@ def run_bot(cfg: dict):
 
     watch_tasks = {}
     load_watch_tasks()  # 启动时恢复
+    pending_actions = {}
     watch_running = False
     watch_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
 
@@ -1706,10 +1769,9 @@ def run_bot(cfg: dict):
             return f"{emoji} {label}"
 
         if not context.args:
-            # 无参数 → 列出最近订单
             try:
-                await update.message.reply_text("⏳ 正在查询最近订单...")
-                orders = ovh_client.list_recent_orders(10)
+                await update.message.reply_text("⏳ 正在查询订单...")
+                orders, total = ovh_client.list_recent_orders(0, 10)
                 if not orders:
                     await update.message.reply_text("📭 没有找到订单")
                     return
@@ -1720,8 +1782,19 @@ def run_bot(cfg: dict):
                     price_str = o.get("price_text") or ""
                     status_str = fmt_status(o["status"])
                     lines.append(f"{date_str}  `{o['order_id']}`\n   {status_str}  {price_str}\n")
-                lines.append(f"💡 `/status <订单号>` 查看详情 + 付款链接")
-                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+                lines.append(f"\n💡 `/status <订单号>` 查看详情")
+                lines.append(f"📄 共 {total} 个订单")
+
+                keyboard = []
+                if total > 10:
+                    keyboard.append([InlineKeyboardButton("▶️ 下一页", callback_data="orders|p|1")])
+
+                await update.message.reply_text(
+                    "\n".join(lines),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+                )
             except Exception as e:
                 await update.message.reply_text(f"❌ 查询失败: {e}")
             return
@@ -1747,13 +1820,11 @@ def run_bot(cfg: dict):
             if detail.get("expiration_date"):
                 lines.append(f"到期: {to_bjt(detail['expiration_date'])}")
 
-            # 待付款状态显示付款链接
             pay_url = detail.get("payment_url")
             unpaid = status in ("pendingPayment", "validatingPayment", "pending_debit_validation", "delivering")
             if pay_url and unpaid:
                 lines.append(f"\n💳 [点击付款]({pay_url})")
 
-            # OVH 原始订单链接
             order_url = detail.get("order_url")
             if order_url:
                 lines.append(f"📄 [OVH 订单页面]({order_url})")
@@ -1761,6 +1832,170 @@ def run_bot(cfg: dict):
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             await update.message.reply_text(f"❌ 查询失败: {e}")
+
+    async def servers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """列出所有独立服务器"""
+        if not check_user(update.effective_user.id):
+            return
+
+        msg = await update.message.reply_text("⏳ 正在获取服务器列表...")
+        try:
+            servers = ovh_client.list_servers()
+            if not servers:
+                await msg.edit_text("📭 没有找到独立服务器")
+                return
+
+            lines = [f"🖥️ *独立服务器列表* ({len(servers)} 台)\n"]
+            for i, s in enumerate(servers):
+                state_emoji = {"ok": "🟢", "error": "🔴"}.get(s.get("state", ""), "🟡")
+                lines.append(f"{state_emoji} *{i+1}.* `{s['name']}`\n   📦 {s.get('commercial_range','?')} | 💻 {s.get('os','?')} | 📍 {s.get('datacenter','?')}")
+                if s.get("ip"):
+                    lines.append(f"   🌐 {s['ip']}")
+                lines.append("")
+
+            lines.append("💡 `/reinstall <序号>` 安装系统\n💡 `/reboot <序号>` 重启服务器")
+            await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            await msg.edit_text(f"❌ 获取失败: {e}")
+
+    async def reinstall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """安装/重装系统"""
+        if not check_user(update.effective_user.id):
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "用法:\n"
+                "/reinstall <序号> — 查看可用系统\n"
+                "/reinstall <序号> <系统名> — 安装系统\n\n"
+                "先 /servers 查看服务器序号"
+            )
+            return
+
+        servers = ovh_client.list_servers()
+        if not servers:
+            await update.message.reply_text("❌ 没有服务器")
+            return
+
+        target = context.args[0]
+        server = None
+        if target.isdigit():
+            idx = int(target) - 1
+            if 0 <= idx < len(servers):
+                server = servers[idx]
+        else:
+            for s in servers:
+                if target in s["name"]:
+                    server = s
+                    break
+
+        if not server:
+            await update.message.reply_text("❌ 找不到服务器，用 /servers 查看列表")
+            return
+
+        service_name = server["name"]
+
+        # 只有序号 → 列出可用系统
+        if len(context.args) == 1:
+            msg = await update.message.reply_text(f"⏳ 正在获取可用系统列表...")
+            templates = ovh_client.get_server_templates(service_name)
+            if not templates:
+                await msg.edit_text("❌ 获取系统列表失败")
+                return
+
+            os_groups = {}
+            for t in templates:
+                base = t.split("-")[0].split("_")[0]
+                if base not in os_groups:
+                    os_groups[base] = []
+                os_groups[base].append(t)
+
+            lines = [f"💿 *可用系统* — `{service_name}`\n"]
+            for os_name in sorted(os_groups.keys()):
+                lines.append(f"*{os_name}:*")
+                for t in os_groups[os_name]:
+                    lines.append(f"  `{t}`")
+                lines.append("")
+
+            lines.append(f"💡 `/reinstall <序号> <系统名>` 安装\n⚠️ 安装会清除所有数据！")
+            text = "\n".join(lines)
+            if len(text) > 4000:
+                text = text[:3900] + "\n... (已截断)"
+            await msg.edit_text(text, parse_mode="Markdown")
+            return
+
+        # 有系统名 → 确认安装
+        template = context.args[1]
+        custom_hostname = context.args[2] if len(context.args) > 2 else None
+
+        action_id = str(int(time.time() * 1000))[-10:]
+        pending_actions[action_id] = {
+            "type": "reinstall",
+            "service_name": service_name,
+            "template": template,
+            "hostname": custom_hostname,
+        }
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚠️ 确认安装", callback_data=f"act|{action_id}"),
+            InlineKeyboardButton("取消", callback_data="cancel"),
+        ]])
+        await update.message.reply_text(
+            f"⚠️ *确认安装系统*\n\n"
+            f"🖥️ 服务器: `{service_name}`\n"
+            f"📦 型号: {server.get('commercial_range','?')}\n"
+            f"💾 当前系统: {server.get('os','?')}\n"
+            f"💿 安装系统: `{template}`\n"
+            + (f"🏷️ 主机名: {custom_hostname}\n" if custom_hostname else "")
+            + f"\n🚨 *所有数据将被清除！*",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+
+    async def reboot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """重启服务器"""
+        if not check_user(update.effective_user.id):
+            return
+
+        if not context.args:
+            await update.message.reply_text("用法: /reboot <序号或名称>\n先 /servers 查看列表")
+            return
+
+        servers = ovh_client.list_servers()
+        if not servers:
+            await update.message.reply_text("❌ 没有服务器")
+            return
+
+        target = context.args[0]
+        server = None
+        if target.isdigit():
+            idx = int(target) - 1
+            if 0 <= idx < len(servers):
+                server = servers[idx]
+        else:
+            for s in servers:
+                if target in s["name"]:
+                    server = s
+                    break
+
+        if not server:
+            await update.message.reply_text("❌ 找不到服务器")
+            return
+
+        action_id = str(int(time.time() * 1000))[-10:]
+        pending_actions[action_id] = {
+            "type": "reboot",
+            "service_name": server["name"],
+        }
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚠️ 确认重启", callback_data=f"act|{action_id}"),
+            InlineKeyboardButton("取消", callback_data="cancel"),
+        ]])
+        await update.message.reply_text(
+            f"⚠️ 确认重启 `{server['name']}`?\n\n"
+            f"📦 {server.get('commercial_range','?')} | 💻 {server.get('os','?')}",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
 
     async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理内联按钮回调 - 支持带存储类型的下单"""
@@ -1796,6 +2031,87 @@ def run_bot(cfg: dict):
             )
             text = _format_buy_result(result)
             await query.edit_message_text(text, parse_mode="Markdown")
+
+        elif parts[0] == "orders" and parts[1] == "p":
+            # 订单翻页
+            page = int(parts[2])
+            offset = page * 10
+            orders, total = ovh_client.list_recent_orders(offset, 10)
+
+            STATUS_MAP = {
+                "delivered": ("✅", "Complete"),
+                "delivering": ("🔄", "Being processed"),
+                "pendingPayment": ("⏳", "Pending payment"),
+                "validatingPayment": ("🔄", "Validating payment"),
+                "canceled": ("❌", "Canceled"),
+                "expired": ("💀", "Expired"),
+            }
+            lines = ["📋 *订单列表*（同 OVH 官网）\n"]
+            for o in orders:
+                date_str = to_bjt(o["date"])[:10] if o.get("date") else "N/A"
+                price_str = o.get("price_text") or ""
+                emoji, label = STATUS_MAP.get(o["status"], ("📌", o["status"]))
+                lines.append(f"{date_str}  `{o['order_id']}`\n   {emoji} {label}  {price_str}\n")
+
+            lines.append(f"\n💡 `/status <订单号>` 查看详情")
+            lines.append(f"📄 共 {total} 个订单 — 第 {page+1}/{(total+9)//10} 页")
+
+            keyboard = []
+            row = []
+            if page > 0:
+                row.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"orders|p|{page-1}"))
+            if offset + 10 < total:
+                row.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"orders|p|{page+1}"))
+            if row:
+                keyboard.append(row)
+
+            await query.edit_message_text(
+                "\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+            )
+
+        elif parts[0] == "act" and len(parts) >= 2:
+            action_id = parts[1]
+            action = pending_actions.pop(action_id, None)
+            if not action:
+                await query.edit_message_text("❌ 操作已过期，请重新发起")
+                return
+
+            if action["type"] == "reinstall":
+                service_name = action["service_name"]
+                template = action["template"]
+                hostname = action.get("hostname")
+                await query.edit_message_text(f"⏳ 正在安装 `{template}` 到 `{service_name}`...")
+                try:
+                    result = ovh_client.reinstall_server(service_name, template, hostname)
+                    task_id = result.get("taskId", "?") if isinstance(result, dict) else "?"
+                    await query.edit_message_text(
+                        f"✅ *安装任务已提交*\n\n"
+                        f"🖥️ 服务器: `{service_name}`\n"
+                        f"💿 系统: `{template}`\n"
+                        f"📋 任务ID: {task_id}\n\n"
+                        f"⏳ 安装进行中... 通常需要 5-30 分钟\n"
+                        f"💡 可用 `/servers` 查看当前系统变化",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    await query.edit_message_text(f"❌ 安装失败: {e}")
+
+            elif action["type"] == "reboot":
+                service_name = action["service_name"]
+                await query.edit_message_text(f"⏳ 正在重启 `{service_name}`...")
+                try:
+                    ovh_client.reboot_server(service_name)
+                    await query.edit_message_text(
+                        f"✅ 重启指令已发送\n\n🖥️ `{service_name}`\n⏳ 服务器正在重启...",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    await query.edit_message_text(f"❌ 重启失败: {e}")
+
+        elif parts[0] == "cancel":
+            await query.edit_message_text("❌ 已取消")
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理转发的消息，自动解析服务器信息并下单（支持存储类型识别）"""
@@ -1928,6 +2244,9 @@ def run_bot(cfg: dict):
     app.add_handler(CommandHandler("watch", watch_cmd))
     app.add_handler(CommandHandler("unwatch", unwatch_cmd))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
+    app.add_handler(CommandHandler("servers", servers_cmd))
+    app.add_handler(CommandHandler("reinstall", reinstall_cmd))
+    app.add_handler(CommandHandler("reboot", reboot_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
