@@ -1305,6 +1305,7 @@ def run_bot(cfg: dict):
     tg_cfg = cfg.get("telegram", {})
     bot_token = tg_cfg.get("bot_token", "")
     allowed_users = tg_cfg.get("allowed_users", [])
+    bot_app = None
 
     if not bot_token:
         logger.error("未配置 Telegram Bot Token")
@@ -1639,8 +1640,14 @@ def run_bot(cfg: dict):
         """发送消息到指定 chat；未指定则回退到默认 chat"""
         try:
             target_chat_id = str(chat_id or tg_cfg.get("chat_id", ""))
-            if target_chat_id:
-                await context.bot.send_message(chat_id=target_chat_id, text=text, parse_mode="Markdown")
+            if not target_chat_id or bot_app is None:
+                logger.error(f"发送监控消息失败: chat_id={target_chat_id}, bot_app={bot_app is not None}")
+                return
+            try:
+                await bot_app.bot.send_message(chat_id=target_chat_id, text=text, parse_mode="Markdown")
+            except Exception as markdown_error:
+                logger.error(f"监控 Markdown 消息发送失败，改用纯文本: {markdown_error}")
+                await bot_app.bot.send_message(chat_id=target_chat_id, text=text)
         except Exception as e:
             logger.error(f"发送监控消息失败: {e}")
 
@@ -2581,6 +2588,7 @@ def run_bot(cfg: dict):
                     await query.edit_message_text("❌ 监控任务不存在或已删除")
                     return
                 task["active"] = not task.get("active", True)
+                task["chat_id"] = str(query.message.chat_id)
                 save_watch_tasks()
                 if task["active"] and not watch_running:
                     watch_running = True
@@ -3036,6 +3044,7 @@ def run_bot(cfg: dict):
 
     # ---- 构建 Bot ----
     app = ApplicationBuilder().token(bot_token).build()
+    bot_app = app
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
