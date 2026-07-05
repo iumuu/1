@@ -856,6 +856,13 @@ class OVHClient:
         except Exception:
             return []
 
+    def get_server_hardware(self, service_name: str) -> dict:
+        """获取服务器硬件规格，含 diskGroups"""
+        try:
+            return self.get(f"/dedicated/server/{service_name}/specifications/hardware")
+        except Exception:
+            return {}
+
     def get_server_templates(self, service_name: str) -> list:
         """获取服务器可安装的 OS 模板列表"""
         try:
@@ -1305,9 +1312,9 @@ def run_bot(cfg: dict):
             "/status orderId — 查看订单详情\n"
             "/catalog — 查看服务器目录\n\n"
             "🖥️ *服务器管理:*\n"
-            "/servers — 列出服务器并用按钮安装/重启\n"
+            "/servers — 按钮式安装/重启，自动识别磁盘组\n"
             "/keys — 查看 OVH 预设 SSH 密钥\n"
-            "/reinstall <序号> — 查看可用系统\n"
+            "/reinstall <序号> — 高级命令/查看可用系统\n"
             "/reinstall <序号> <系统名> [key=密钥名] [raid0 group=N] — 安装系统\n"
             "/reboot <序号> — 重启服务器\n\n"
             "💡 直接转发 OVH 服务器信息也可自动下单！\n"
@@ -1872,15 +1879,31 @@ def run_bot(cfg: dict):
             keyboard = []
             for i, s in enumerate(servers):
                 state_emoji = {"ok": "🟢", "error": "🔴"}.get(s.get("state", ""), "🟡")
+                hw = ovh_client.get_server_hardware(s["name"])
+                disk_groups = hw.get("diskGroups", []) if isinstance(hw, dict) else []
+                default_group = hw.get("defaultDiskGroupId") if isinstance(hw, dict) else None
+
                 lines.append(f"{state_emoji} {i+1}. {s['name']}")
                 lines.append(f"   📦 {s.get('commercial_range','?')}")
                 lines.append(f"   💻 {s.get('os','?')} | 📍 {s.get('datacenter','?')}")
                 if s.get("ip"):
                     lines.append(f"   🌐 {s['ip']}")
+                if disk_groups:
+                    lines.append("   💽 磁盘组:")
+                    for dg in disk_groups:
+                        size = dg.get("diskSize", {})
+                        size_txt = f"{size.get('value','?')}{size.get('unit','')}"
+                        mark = " (默认)" if dg.get("diskGroupId") == default_group else ""
+                        lines.append(
+                            f"      group={dg.get('diskGroupId')} {dg.get('numberOfDisks')}x {dg.get('diskType')} {size_txt}{mark}"
+                        )
                 lines.append("")
 
                 action_id = f"srv{i+1}_{str(int(time.time() * 1000))[-6:]}"
-                pending_actions[action_id] = {"type": "server", "service_name": s["name"], "index": i+1}
+                pending_actions[action_id] = {
+                    "type": "server", "service_name": s["name"], "index": i+1,
+                    "disk_groups": disk_groups, "default_group": default_group
+                }
                 keyboard.append([
                     InlineKeyboardButton(f"💿 安装 {i+1}", callback_data=f"srv|install|{action_id}"),
                     InlineKeyboardButton(f"🔄 重启 {i+1}", callback_data=f"srv|reboot|{action_id}"),
@@ -1914,12 +1937,11 @@ def run_bot(cfg: dict):
         if not context.args:
             await update.message.reply_text(
                 "用法:\n"
+                "/servers — 用按钮选择服务器、系统、SSH key、磁盘方案\n\n"
+                "高级命令:\n"
                 "/reinstall <序号> — 查看可用系统\n"
-                "/reinstall <序号> <系统名> [key=密钥名] [raid0 group=N] [disks=N] [host=主机名] — 安装系统\n\n"
-                "示例:\n"
-                "/reinstall 1 debian12_64 key=lei\n"
-                "/reinstall 1 ubuntu2404-server_64 key=lei raid0 group=1 disks=4\n\n"
-                "先 /servers 查看服务器序号，/keys 查看 OVH 预设密钥"
+                "/reinstall <序号> <系统名> [key=密钥名] [raid0 group=N disks=N] [host=主机名]\n\n"
+                "推荐直接用 /servers 按钮流程，避免 group 写错。"
             )
             return
 
@@ -2017,8 +2039,7 @@ def run_bot(cfg: dict):
         if raid0 and disk_group_id is None:
             await update.message.reply_text(
                 "❌ RAID0 必须显式指定 `group=磁盘组ID`，避免把 SSD 和 HDD 混合组阵列。\n\n"
-                "示例: `/reinstall 1 debian12_64 key=lei raid0 group=1 disks=4`\n\n"
-                "混合盘机器通常 group=0 是 SSD，group=1 是 HDD，但请以 OVH 安装页显示为准。",
+                "推荐使用 `/servers` 按钮流程，Bot 会读取 OVH 硬件规格并自动生成正确的 RAID0 选项。",
                 parse_mode="Markdown"
             )
             return
@@ -2216,23 +2237,41 @@ def run_bot(cfg: dict):
 
             elif op == "key" and len(parts) >= 4:
                 action["ssh_key_name"] = None if parts[3] == "none" else parts[3]
-                keyboard = [
-                    [InlineKeyboardButton("默认分区 / 无 RAID", callback_data=f"srv|raid|{action_id}|none")],
-                    [InlineKeyboardButton("HDD RAID0 (group=1 disks=4)", callback_data=f"srv|raid|{action_id}|hdd4")],
-                    [InlineKeyboardButton("取消", callback_data="cancel")],
-                ]
+                keyboard = [[InlineKeyboardButton("默认分区 / 无 RAID", callback_data=f"srv|raid|{action_id}|none")]]
+                for dg in action.get("disk_groups", []):
+                    group_id = dg.get("diskGroupId")
+                    disks = dg.get("numberOfDisks") or 0
+                    if group_id is None or disks < 2:
+                        continue
+                    size = dg.get("diskSize", {})
+                    size_txt = f"{size.get('value','?')}{size.get('unit','')}"
+                    disk_type = dg.get("diskType", "DISK")
+                    label = f"RAID0 group={group_id} {disks}x {disk_type} {size_txt}"
+                    keyboard.append([InlineKeyboardButton(label, callback_data=f"srv|raid|{action_id}|g{group_id}d{disks}")])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
-                    f"🧩 选择磁盘方案\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}\n\n混合盘机器不要把 SSD 和 HDD 混合 RAID0。",
+                    f"🧩 选择磁盘方案\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}\n\nRAID0 只会对按钮显示的同一个磁盘组执行，不会混合不同类型磁盘。",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
             elif op == "raid" and len(parts) >= 4:
                 mode = parts[3]
-                if mode == "hdd4":
+                if mode.startswith("g") and "d" in mode:
+                    try:
+                        group_part, disk_part = mode[1:].split("d", 1)
+                        group_id = int(group_part)
+                        disks = int(disk_part)
+                    except ValueError:
+                        await query.edit_message_text("❌ 磁盘方案参数无效，请重新 /servers")
+                        return
+                    dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == group_id), None)
+                    disk_type = dg.get("diskType", "DISK") if dg else "DISK"
+                    size = dg.get("diskSize", {}) if dg else {}
+                    size_txt = f"{size.get('value','?')}{size.get('unit','')}"
                     action["raid0"] = True
-                    action["disk_group_id"] = 1
-                    action["raid_disks"] = 4
-                    raid_text = "HDD RAID0 group=1 disks=4"
+                    action["disk_group_id"] = group_id
+                    action["raid_disks"] = disks
+                    raid_text = f"RAID0 group={group_id} {disks}x {disk_type} {size_txt}"
                 else:
                     action["raid0"] = False
                     action["disk_group_id"] = None
