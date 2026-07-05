@@ -1470,15 +1470,16 @@ def run_bot(cfg: dict):
 
             has_available = False
             for dc, status in cfg["datacenters"].items():
-                dc_display = DC_DISPLAY_MAP.get(dc, dc)
+                dc_display = format_dc(dc)
+                status_cn = format_dc_status(status)
                 key = f"{cfg['fqn']}|{dc}"
                 price_str = price_cache.get(key, "")
                 if status in UNAVAILABLE_STATES:
-                    text += f"   ❌ {dc}: {status}\n"
+                    text += f"   ❌ {dc_display}: {status_cn}\n"
                 else:
                     has_available = True
                     price_text = f" 💰{price_str}" if price_str else ""
-                    text += f"   ✅ {dc}: {status}{price_text}\n"
+                    text += f"   ✅ {dc_display}: {status_cn}{price_text}\n"
                     btn_label = f"🛒#{idx+1} {stor_display} @{dc}"
                     callback = f"buy|preset|{plan_code}|{dc}|{stor_keyword}"
                     buttons.append([InlineKeyboardButton(btn_label, callback_data=callback)])
@@ -1710,11 +1711,12 @@ def run_bot(cfg: dict):
             status = "🟢 监控中" if task["active"] else "🔴 已停止"
             filter_parts = []
             if task.get("dc"):
-                filter_parts.append(f"机房={task['dc']}")
+                dc_display = format_dc(task['dc']) if task['dc'] else "全部机房"
+                filter_parts.append(f"机房={dc_display}")
             if task.get("storage"):
-                filter_parts.append(f"存储={task['storage']}")
+                filter_parts.append(f"存储={format_storage(task['storage'])}")
             if task.get("memory"):
-                filter_parts.append(f"内存={task['memory']}")
+                filter_parts.append(f"内存={format_memory(task['memory'])}")
             filter_str = f" ({', '.join(filter_parts)})" if filter_parts else ""
 
             text += (
@@ -2114,6 +2116,7 @@ def run_bot(cfg: dict):
 
     async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理内联按钮回调 - 支持带存储类型的下单"""
+        nonlocal watch_running
         query = update.callback_query
         await query.answer()
 
@@ -2517,11 +2520,35 @@ def run_bot(cfg: dict):
             if action["type"] == "buy_start":
                 plan_code = action["plan_code"]
                 server_type = guess_server_type(plan_code)
-                await query.edit_message_text(f"🚀 正在抢购 `{plan_code}` @ {action.get('dc')}...")
+                dc = action.get("dc")
+
+                # 先检查有没有货，没货就不浪费时间调用下单 API
+                available = ovh_client.find_available_configs(
+                    plan_code,
+                    target_dc=dc,
+                    target_storage=action.get("storage"),
+                    target_memory=action.get("memory"),
+                )
+                if not available:
+                    dc_display = format_dc(dc) if dc else "全部机房"
+                    cfg_mem = format_memory(action.get("memory", ""))
+                    cfg_stor = format_storage(action.get("storage", ""))
+                    await query.edit_message_text(
+                        f"❌ *当前无货，无法抢购*\n\n"
+                        f"📦 型号: `{plan_code}`\n"
+                        f"💾 配置: {cfg_mem} + {cfg_stor}\n"
+                        f"📍 机房: {dc_display}\n\n"
+                        f"💡 请用 /watch 设定监控，等有货后自动下单",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                dc_display = format_dc(dc) if dc else available[0]["datacenter"]
+                await query.edit_message_text(f"🚀 正在抢购 `{plan_code}` @ {dc_display}...")
                 result = ovh_client.quick_buy(
                     plan_code=plan_code,
                     server_type=server_type,
-                    datacenter=action.get("dc"),
+                    datacenter=dc,
                     target_storage=action.get("storage"),
                     target_memory=action.get("memory"),
                 )
@@ -2672,7 +2699,7 @@ def run_bot(cfg: dict):
         if result["success"]:
             text = "✅ *抢购成功！*\n\n"
             text += f"📦 服务器: `{result['plan_code']}`\n"
-            text += f"🏗️ 数据中心: {result['datacenter']} ({DC_DISPLAY_MAP.get(result['datacenter'], result['datacenter'])})\n"
+            text += f"🏗️ 数据中心: {format_dc(result['datacenter'])}\n"
 
             if result.get("config_info"):
                 ci = result["config_info"]
@@ -2711,7 +2738,7 @@ def run_bot(cfg: dict):
                     text += f"  {mem} + {stor}:\n"
                     for dc, status in cfg["datacenters"].items():
                         icon = "✅" if status not in UNAVAILABLE_STATES else "❌"
-                        text += f"    {icon} {dc}: {status}\n"
+                        text += f"    {icon} {format_dc(dc)}: {format_dc_status(status)}\n"
 
         return text
 
