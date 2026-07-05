@@ -2329,33 +2329,25 @@ def run_bot(cfg: dict):
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
-            elif stage == "dcall" and len(parts) >= 3:
+            elif stage == "dc" and len(parts) >= 4:
+                dc = parts[3]
                 cfg = session.get("selected_cfg")
                 if not cfg:
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
-                keyboard = []
-                for dc, status in cfg["datacenters"].items():
-                    keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"watch|dc|{session_id}|{dc}")])
-                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
-                await query.edit_message_text(
-                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                session["selected_dc"] = dc
 
-            elif stage == "dcall" and len(parts) >= 3:
-                cfg = session.get("selected_cfg")
-                if not cfg:
-                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
-                    return
-                keyboard = []
-                for dc, status in cfg["datacenters"].items():
-                    if status not in UNAVAILABLE_STATES:
-                        keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"watch|dc|{session_id}|{dc}")])
-                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                keyboard = [
+                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
+                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
+                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
+                    [InlineKeyboardButton("取消", callback_data="cancel")],
+                ]
                 await query.edit_message_text(
-                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    f"🎯 选择下单数量\n\n"
+                    f"型号: `{plan_code}`\n"
+                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"机房: {dc}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -2421,21 +2413,6 @@ def run_bot(cfg: dict):
                     title = f"📍 这个配置没有可选机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
                 await query.edit_message_text(
                     title,
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-
-            elif stage == "dcall" and len(parts) >= 3:
-                cfg = session.get("selected_cfg")
-                if not cfg:
-                    await query.edit_message_text("❌ 会话状态丢失，请重新 /buy")
-                    return
-                keyboard = []
-                for dc, status in cfg["datacenters"].items():
-                    keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"buy|dc|{session_id}|{dc}")])
-                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
-                await query.edit_message_text(
-                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
