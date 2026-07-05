@@ -2319,16 +2319,19 @@ def run_bot(cfg: dict):
                 for dc, status in cfg["datacenters"].items():
                     if status not in UNAVAILABLE_STATES:
                         dcs.append((dc, status))
-                if not dcs:
-                    await query.edit_message_text("😢 该配置当前没有可监控的机房，请重新 /watch")
-                    return
-
                 keyboard = []
-                for dc, status in dcs:
-                    keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"watch|dc|{session_id}|{dc}")])
+                if dcs:
+                    for dc, status in dcs:
+                        keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"watch|dc|{session_id}|{dc}")])
+                    title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
+                else:
+                    # 当前没货也允许继续设定监控条件
+                    session["selected_dc"] = None
+                    keyboard.append([InlineKeyboardButton("继续设置监控数量", callback_data=f"watch|count|{session_id}|1")])
+                    title = f"📍 当前这个配置暂时没货\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n仍可继续设置监控条件"
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
-                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    title,
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -2411,16 +2414,18 @@ def run_bot(cfg: dict):
                 for dc, status in cfg["datacenters"].items():
                     if status not in UNAVAILABLE_STATES:
                         dcs.append((dc, status))
-                if not dcs:
-                    await query.edit_message_text("😢 该配置当前没有可抢的机房，请重新 /buy")
-                    return
-
                 keyboard = []
-                for dc, status in dcs:
-                    keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"buy|dc|{session_id}|{dc}")])
+                if dcs:
+                    for dc, status in dcs:
+                        keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"buy|dc|{session_id}|{dc}")])
+                    title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
+                else:
+                    session["selected_dc"] = None
+                    keyboard.append([InlineKeyboardButton("继续设置下单数量", callback_data=f"buy|count|{session_id}|1")])
+                    title = f"📍 当前这个配置暂时没货\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n仍可继续设置抢购条件"
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
-                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    title,
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
