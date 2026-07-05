@@ -1305,7 +1305,7 @@ def run_bot(cfg: dict):
             "/status orderId — 查看订单详情\n"
             "/catalog — 查看服务器目录\n\n"
             "🖥️ *服务器管理:*\n"
-            "/servers — 列出所有独立服务器\n"
+            "/servers — 列出服务器并用按钮安装/重启\n"
             "/keys — 查看 OVH 预设 SSH 密钥\n"
             "/reinstall <序号> — 查看可用系统\n"
             "/reinstall <序号> <系统名> [key=密钥名] [raid0 group=N] — 安装系统\n"
@@ -1869,6 +1869,7 @@ def run_bot(cfg: dict):
                 return
 
             lines = [f"🖥️ 独立服务器列表 ({len(servers)} 台)\n"]
+            keyboard = []
             for i, s in enumerate(servers):
                 state_emoji = {"ok": "🟢", "error": "🔴"}.get(s.get("state", ""), "🟡")
                 lines.append(f"{state_emoji} {i+1}. {s['name']}")
@@ -1878,8 +1879,15 @@ def run_bot(cfg: dict):
                     lines.append(f"   🌐 {s['ip']}")
                 lines.append("")
 
-            lines.append("💡 /reinstall <序号> 安装系统\n💡 /reboot <序号> 重启服务器")
-            await msg.edit_text("\n".join(lines))
+                action_id = f"srv{i+1}_{str(int(time.time() * 1000))[-6:]}"
+                pending_actions[action_id] = {"type": "server", "service_name": s["name"], "index": i+1}
+                keyboard.append([
+                    InlineKeyboardButton(f"💿 安装 {i+1}", callback_data=f"srv|install|{action_id}"),
+                    InlineKeyboardButton(f"🔄 重启 {i+1}", callback_data=f"srv|reboot|{action_id}"),
+                ])
+
+            lines.append("💡 也可用命令: /reinstall <序号> 或 /reboot <序号>")
+            await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception as e:
             await msg.edit_text(f"❌ 获取失败: {e}")
 
@@ -2163,6 +2171,107 @@ def run_bot(cfg: dict):
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
             )
+
+        elif parts[0] == "srv" and len(parts) >= 3:
+            op = parts[1]
+            action_id = parts[2]
+            action = pending_actions.get(action_id)
+            if not action:
+                await query.edit_message_text("❌ 操作已过期，请重新 /servers")
+                return
+            service_name = action["service_name"]
+
+            if op == "install":
+                templates = ovh_client.get_server_templates(service_name)
+                preferred = [
+                    "debian12_64", "debian13_64",
+                    "ubuntu2404-server_64", "ubuntu2204-server_64",
+                    "proxmox8_64", "proxmox9_64",
+                    "rocky9_64", "alma9_64",
+                ]
+                available = [t for t in preferred if t in templates]
+                if not available:
+                    available = templates[:8]
+                keyboard = []
+                for t in available:
+                    keyboard.append([InlineKeyboardButton(t, callback_data=f"srv|os|{action_id}|{t}")])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    f"💿 选择要安装的系统\n\n服务器: {service_name}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif op == "os" and len(parts) >= 4:
+                action["template"] = parts[3]
+                keys = ovh_client.list_ssh_keys()
+                keyboard = []
+                for k in keys[:8]:
+                    keyboard.append([InlineKeyboardButton(f"🔑 {k}", callback_data=f"srv|key|{action_id}|{k}")])
+                keyboard.append([InlineKeyboardButton("不使用 SSH key", callback_data=f"srv|key|{action_id}|none")])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    f"🔑 选择 SSH 密钥\n\n服务器: {service_name}\n系统: {action['template']}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif op == "key" and len(parts) >= 4:
+                action["ssh_key_name"] = None if parts[3] == "none" else parts[3]
+                keyboard = [
+                    [InlineKeyboardButton("默认分区 / 无 RAID", callback_data=f"srv|raid|{action_id}|none")],
+                    [InlineKeyboardButton("HDD RAID0 (group=1 disks=4)", callback_data=f"srv|raid|{action_id}|hdd4")],
+                    [InlineKeyboardButton("取消", callback_data="cancel")],
+                ]
+                await query.edit_message_text(
+                    f"🧩 选择磁盘方案\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}\n\n混合盘机器不要把 SSD 和 HDD 混合 RAID0。",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif op == "raid" and len(parts) >= 4:
+                mode = parts[3]
+                if mode == "hdd4":
+                    action["raid0"] = True
+                    action["disk_group_id"] = 1
+                    action["raid_disks"] = 4
+                    raid_text = "HDD RAID0 group=1 disks=4"
+                else:
+                    action["raid0"] = False
+                    action["disk_group_id"] = None
+                    action["raid_disks"] = None
+                    raid_text = "默认分区 / 无 RAID"
+
+                confirm_id = str(int(time.time() * 1000))[-10:]
+                pending_actions[confirm_id] = {
+                    "type": "reinstall",
+                    "service_name": service_name,
+                    "template": action["template"],
+                    "hostname": None,
+                    "ssh_key_name": action.get("ssh_key_name"),
+                    "raid0": action.get("raid0", False),
+                    "raid_disks": action.get("raid_disks"),
+                    "disk_group_id": action.get("disk_group_id"),
+                }
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚠️ 确认安装", callback_data=f"act|{confirm_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel"),
+                ]])
+                await query.edit_message_text(
+                    f"⚠️ 确认安装系统\n\n"
+                    f"服务器: {service_name}\n"
+                    f"系统: {action['template']}\n"
+                    f"SSH key: {action.get('ssh_key_name') or '不使用'}\n"
+                    f"磁盘: {raid_text}\n\n"
+                    f"🚨 所有数据将被清除！",
+                    reply_markup=keyboard
+                )
+
+            elif op == "reboot":
+                confirm_id = str(int(time.time() * 1000))[-10:]
+                pending_actions[confirm_id] = {"type": "reboot", "service_name": service_name}
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚠️ 确认重启", callback_data=f"act|{confirm_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel"),
+                ]])
+                await query.edit_message_text(f"⚠️ 确认重启 {service_name}?", reply_markup=kb)
 
         elif parts[0] == "act" and len(parts) >= 2:
             action_id = parts[1]
