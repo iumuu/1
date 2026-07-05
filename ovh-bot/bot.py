@@ -1086,6 +1086,7 @@ class OVHClient:
         s = config_str.lower().strip()
         # 移除型号后缀
         patterns = [
+            r'-\d{2}sk[a-z0-9]+(?:-v\d+)?$', r'-\d{2}rise[a-z0-9]+(?:-v\d+)?$',
             r'-\d+sk[a-z]+\d*', r'-\d+rise\d*', r'-\d+sys\w*',
             r'-\d+ska\d*', r'-\d+skstor\d*', r'-\d+skgame\d*',
             r'-\d+skc\d+', r'-\d+skb\d+', r'-ks\d+', r'-v\d+',
@@ -1616,8 +1617,8 @@ def run_bot(cfg: dict):
                                 plan_code=plan_code,
                                 server_type=server_type,
                                 datacenter=chosen["datacenter"],
-                                target_storage=task.get("storage"),
-                                target_memory=task.get("memory"),
+                                target_storage=chosen.get("storage") or task.get("storage"),
+                                target_memory=chosen.get("memory") or task.get("memory"),
                             )
 
                             if result["success"]:
@@ -1648,6 +1649,10 @@ def run_bot(cfg: dict):
                                 else:
                                     text += "\n\n⚠️ 请尽快手动付款以锁定订单！"
                             else:
+                                # 失败也加短冷却，避免库存瞬时变化时疯狂刷屏/重复请求
+                                last_order_time[cooldown_key] = now
+                                task["_last_order_time"] = last_order_time
+                                save_watch_tasks()
                                 text = f"❌ 监控自动下单失败: `{plan_code}`\n{result['error']}"
 
                             await _send_msg(text, task.get("chat_id"))
