@@ -876,11 +876,39 @@ class OVHClient:
         except Exception as e:
             return str(e)
 
-    def reinstall_server(self, service_name: str, template: str, hostname: str = None) -> dict:
+    def list_ssh_keys(self) -> list:
+        """列出 OVH 账号中预设的 SSH key"""
+        try:
+            return self.get("/me/sshKey")
+        except Exception:
+            return []
+
+    def get_ssh_key_value(self, key_name: str) -> str:
+        """读取 OVH 预设 SSH key 的公钥内容"""
+        detail = self.get(f"/me/sshKey/{key_name}")
+        return detail.get("key")
+
+    def reinstall_server(self, service_name: str, template: str, hostname: str = None,
+                         ssh_key_name: str = None, raid0: bool = False, raid_disks: int = None) -> dict:
         """重装系统 - 返回 task 信息"""
         body = {"operatingSystem": template}
+        customizations = {}
         if hostname:
-            body["customizations"] = {"hostname": hostname}
+            customizations["hostname"] = hostname
+        if ssh_key_name:
+            customizations["sshKey"] = self.get_ssh_key_value(ssh_key_name)
+        if customizations:
+            body["customizations"] = customizations
+        if raid0:
+            partitioning = {
+                "disks": raid_disks,
+                "layout": [
+                    {"mountPoint": "/", "fileSystem": "ext4", "raidLevel": 0, "size": 0}
+                ],
+            }
+            if raid_disks is None:
+                partitioning.pop("disks")
+            body["storage"] = [{"partitioning": partitioning}]
         return self.post(f"/dedicated/server/{service_name}/reinstall", **body)
 
     def reboot_server(self, service_name: str) -> dict:
@@ -1284,8 +1312,9 @@ def run_bot(cfg: dict):
             "/catalog — 查看服务器目录\n\n"
             "🖥️ *服务器管理:*\n"
             "/servers — 列出所有独立服务器\n"
+            "/keys — 查看 OVH 预设 SSH 密钥\n"
             "/reinstall <序号> — 查看可用系统\n"
-            "/reinstall <序号> <系统名> — 安装系统\n"
+            "/reinstall <序号> <系统名> [key=密钥名] [raid0] — 安装系统\n"
             "/reboot <序号> — 重启服务器\n\n"
             "💡 直接转发 OVH 服务器信息也可自动下单！\n"
             f"🌐 当前区域: {ovh_client.zone} / {ovh_client.subsidiary}",
@@ -1858,6 +1887,21 @@ def run_bot(cfg: dict):
         except Exception as e:
             await msg.edit_text(f"❌ 获取失败: {e}")
 
+    async def keys_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """列出 OVH 预设 SSH 密钥"""
+        if not check_user(update.effective_user.id):
+            return
+        try:
+            keys = ovh_client.list_ssh_keys()
+            if not keys:
+                await update.message.reply_text("📭 OVH 账号里没有预设 SSH 密钥")
+                return
+            text = "🔑 *OVH 预设 SSH 密钥*\n\n" + "\n".join(f"• `{k}`" for k in keys)
+            text += "\n\n💡 重装时使用: `/reinstall 1 debian12_64 key=密钥名`"
+            await update.message.reply_text(text, parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 获取密钥失败: {e}")
+
     async def reinstall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """安装/重装系统"""
         if not check_user(update.effective_user.id):
@@ -1867,8 +1911,11 @@ def run_bot(cfg: dict):
             await update.message.reply_text(
                 "用法:\n"
                 "/reinstall <序号> — 查看可用系统\n"
-                "/reinstall <序号> <系统名> — 安装系统\n\n"
-                "先 /servers 查看服务器序号"
+                "/reinstall <序号> <系统名> [key=密钥名] [raid0] [disks=N] [host=主机名] — 安装系统\n\n"
+                "示例:\n"
+                "/reinstall 1 debian12_64 key=lei raid0\n"
+                "/reinstall 1 ubuntu2404-server_64 key=lei raid0 disks=4\n\n"
+                "先 /servers 查看服务器序号，/keys 查看 OVH 预设密钥"
             )
             return
 
@@ -1924,9 +1971,38 @@ def run_bot(cfg: dict):
             await msg.edit_text(text, parse_mode="Markdown")
             return
 
-        # 有系统名 → 确认安装
+        # 有系统名 → 解析选项并确认安装
         template = context.args[1]
-        custom_hostname = context.args[2] if len(context.args) > 2 else None
+        custom_hostname = None
+        ssh_key_name = None
+        raid0 = False
+        raid_disks = None
+        unknown_opts = []
+        for opt in context.args[2:]:
+            low = opt.lower()
+            if low == "raid0":
+                raid0 = True
+            elif low.startswith("key="):
+                ssh_key_name = opt.split("=", 1)[1]
+            elif low.startswith("host="):
+                custom_hostname = opt.split("=", 1)[1]
+            elif low.startswith("disks="):
+                try:
+                    raid_disks = int(opt.split("=", 1)[1])
+                except ValueError:
+                    unknown_opts.append(opt)
+            else:
+                unknown_opts.append(opt)
+
+        if unknown_opts:
+            await update.message.reply_text(f"❌ 无法识别参数: {' '.join(unknown_opts)}\n支持: key=密钥名 raid0 disks=N host=主机名")
+            return
+
+        if ssh_key_name:
+            keys = ovh_client.list_ssh_keys()
+            if ssh_key_name not in keys:
+                await update.message.reply_text(f"❌ OVH SSH 密钥 `{ssh_key_name}` 不存在\n可用密钥: {', '.join(keys) if keys else '无'}", parse_mode="Markdown")
+                return
 
         action_id = str(int(time.time() * 1000))[-10:]
         pending_actions[action_id] = {
@@ -1934,6 +2010,9 @@ def run_bot(cfg: dict):
             "service_name": service_name,
             "template": template,
             "hostname": custom_hostname,
+            "ssh_key_name": ssh_key_name,
+            "raid0": raid0,
+            "raid_disks": raid_disks,
         }
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("⚠️ 确认安装", callback_data=f"act|{action_id}"),
@@ -1945,8 +2024,10 @@ def run_bot(cfg: dict):
             f"📦 型号: {server.get('commercial_range','?')}\n"
             f"💾 当前系统: {server.get('os','?')}\n"
             f"💿 安装系统: `{template}`\n"
+            + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
+            + (f"🧩 RAID: RAID0" + (f" ({raid_disks} disks)" if raid_disks else "") + "\n" if raid0 else "")
             + (f"🏷️ 主机名: {custom_hostname}\n" if custom_hostname else "")
-            + f"\n🚨 *所有数据将被清除！*",
+            + f"\n🚨 *所有数据将被清除！*", 
             parse_mode="Markdown",
             reply_markup=kb
         )
@@ -2082,15 +2163,23 @@ def run_bot(cfg: dict):
                 service_name = action["service_name"]
                 template = action["template"]
                 hostname = action.get("hostname")
+                ssh_key_name = action.get("ssh_key_name")
+                raid0 = action.get("raid0", False)
+                raid_disks = action.get("raid_disks")
                 await query.edit_message_text(f"⏳ 正在安装 `{template}` 到 `{service_name}`...")
                 try:
-                    result = ovh_client.reinstall_server(service_name, template, hostname)
+                    result = ovh_client.reinstall_server(
+                        service_name, template, hostname,
+                        ssh_key_name=ssh_key_name, raid0=raid0, raid_disks=raid_disks
+                    )
                     task_id = result.get("taskId", "?") if isinstance(result, dict) else "?"
                     await query.edit_message_text(
                         f"✅ *安装任务已提交*\n\n"
                         f"🖥️ 服务器: `{service_name}`\n"
                         f"💿 系统: `{template}`\n"
-                        f"📋 任务ID: {task_id}\n\n"
+                        + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
+                        + (f"🧩 RAID: RAID0" + (f" ({raid_disks} disks)" if raid_disks else "") + "\n" if raid0 else "")
+                        + f"📋 任务ID: {task_id}\n\n"
                         f"⏳ 安装进行中... 通常需要 5-30 分钟\n"
                         f"💡 可用 `/servers` 查看当前系统变化",
                         parse_mode="Markdown"
@@ -2245,6 +2334,7 @@ def run_bot(cfg: dict):
     app.add_handler(CommandHandler("unwatch", unwatch_cmd))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
     app.add_handler(CommandHandler("servers", servers_cmd))
+    app.add_handler(CommandHandler("keys", keys_cmd))
     app.add_handler(CommandHandler("reinstall", reinstall_cmd))
     app.add_handler(CommandHandler("reboot", reboot_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
