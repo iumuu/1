@@ -2587,8 +2587,12 @@ def run_bot(cfg: dict):
                 if not task:
                     await query.edit_message_text("❌ 监控任务不存在或已删除")
                     return
-                task["active"] = not task.get("active", True)
+                was_active = task.get("active", True)
+                task["active"] = not was_active
                 task["chat_id"] = str(query.message.chat_id)
+                if task["active"] and task.get("ordered", 0) >= task.get("max_orders", 1):
+                    task["ordered"] = 0
+                    task["_last_order_time"] = {}
                 save_watch_tasks()
                 if task["active"] and not watch_running:
                     watch_running = True
