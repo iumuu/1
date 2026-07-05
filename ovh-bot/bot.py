@@ -1323,32 +1323,54 @@ def run_bot(cfg: dict):
             await update.message.reply_text("⛔ 未授权")
             return
         await update.message.reply_text(
-            "🤖 *OVH 抢购 Bot v2 已就绪！*\n\n"
-            "📌 *命令列表:*\n\n"
-            "🛒 *下单类:*\n"
-            "/buy planCode dc 存储 内存 — 一次性抢购\n"
-            "/check planCode — 查看所有配置可用性\n\n"
-            "📡 *监控类:*\n"
-            "/watch planCode dc 存储 内存 下单数 — 开始监控\n"
-            "/unwatch planCode — 取消监控\n"
-            "/watchlist — 查看当前监控列表\n\n"
-            "💳 *订单类:*\n"
-            "/pay orderId — 获取付款链接\n"
-            "/status — 查看最近订单\n"
-            "/status orderId — 查看订单详情\n"
-            "/catalog — 查看服务器目录\n\n"
-            "🖥️ *服务器管理:*\n"
-            "/servers — 按钮式安装/重启，自动识别磁盘组\n"
-            "/keys — 查看 OVH 预设 SSH 密钥\n\n"
-            "💡 直接转发 OVH 服务器信息也可自动下单！\n"
-            f"🌐 当前区域: {ovh_client.zone} / {ovh_client.subsidiary}",
+            "🤖 *OVH 抢购 Bot 已就绪*\n\n"
+            "常用入口:\n"
+            "🛒 /buy `型号` - 只显示当前有货配置，按钮抢购\n"
+            "📡 /watch `型号` - 显示全部配置，按钮设置监控\n"
+            "📋 /watchlist - 查看、暂停、启用、删除监控\n"
+            "💳 /status - 查看最近订单\n"
+            "🖥️ /servers - 服务器列表、重装、重启\n\n"
+            "输入 /help 查看完整说明。\n"
+            f"🌐 当前区域: `{ovh_client.zone}` / `{ovh_client.subsidiary}`",
             parse_mode="Markdown",
         )
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user(update.effective_user.id):
             return
-        await start_cmd(update, context)
+        await update.message.reply_text(
+            "📖 *OVH Bot 帮助*\n\n"
+            "🛒 *抢购*\n"
+            "/buy `型号`\n"
+            "只列出当前有货的配置和机房，按按钮选择配置、机房、数量后下单。\n\n"
+            "/check `型号`\n"
+            "查看该型号全部配置、全部机房的库存状态。\n\n"
+            "📡 *监控*\n"
+            "/watch `型号`\n"
+            "列出全部配置，包括当前无货配置；按按钮选择配置、机房、下单上限。\n\n"
+            "/watchlist\n"
+            "查看监控进度，并可按钮暂停、启用、删除任务。已达上限的任务重新启用会自动重置进度。\n\n"
+            "/unwatch `型号`\n"
+            "删除指定监控；不带型号时删除全部监控。\n\n"
+            "💳 *订单*\n"
+            "/status\n"
+            "查看最近订单，支持翻页。\n\n"
+            "/status `订单号`\n"
+            "查看订单详情、状态、价格和待付款链接。\n\n"
+            "/pay `订单号`\n"
+            "获取指定订单付款链接。\n\n"
+            "🖥️ *服务器*\n"
+            "/servers\n"
+            "查看服务器列表；按钮执行重装、重启。重装流程会自动识别磁盘组和 RAID0 选项。\n\n"
+            "/keys\n"
+            "查看 OVH 账户里的预设 SSH 密钥。\n\n"
+            "📦 *目录*\n"
+            "/catalog\n"
+            "查看服务器目录。\n\n"
+            "💡 多数流程支持按钮返回上一步，取消会直接删除当前菜单消息。\n"
+            f"🌐 当前区域: `{ovh_client.zone}` / `{ovh_client.subsidiary}`",
+            parse_mode="Markdown",
+        )
 
     async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user(update.effective_user.id):
