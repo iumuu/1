@@ -2925,7 +2925,11 @@ def run_bot(cfg: dict):
                     await query.edit_message_text(f"❌ 重启失败: {e}")
 
         elif parts[0] == "cancel":
-            await query.edit_message_text("❌ 已取消")
+            try:
+                await query.message.delete()
+            except Exception as e:
+                logger.error(f"删除取消消息失败: {e}")
+                await query.edit_message_reply_markup(reply_markup=None)
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理转发的消息，自动解析服务器信息并下单（支持存储类型识别）"""
