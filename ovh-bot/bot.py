@@ -1308,7 +1308,7 @@ def run_bot(cfg: dict):
             "/watchlist — 查看当前监控列表\n\n"
             "💳 *订单类:*\n"
             "/pay orderId — 获取付款链接\n"
-            "/status — 查看最近订单 (可翻页)\n"
+            "/status — 查看最近订单\n"
             "/status orderId — 查看订单详情\n"
             "/catalog — 查看服务器目录\n\n"
             "🖥️ *服务器管理:*\n"
@@ -1833,12 +1833,12 @@ def run_bot(cfg: dict):
             return
 
         try:
-            await update.message.reply_text(f"⏳ 正在查询订单 {order_id}...")
+            await update.message.reply_text(f"⏳ 正在查询订单 `{order_id}`...", parse_mode="Markdown")
 
             detail = ovh_client.get_order_details(order_id)
             status = detail.get("status", "unknown")
 
-            lines = [f"📋 *订单 {order_id}*\n"]
+            lines = [f"📋 *订单* `{order_id}`\n"]
             lines.append(f"状态: {fmt_status(status)}")
             if detail.get("date"):
                 lines.append(f"日期: {to_bjt(detail['date'])}")
@@ -2337,8 +2337,8 @@ def run_bot(cfg: dict):
                         f"🖥️ 服务器: `{service_name}`\n"
                         f"💿 系统: `{template}`\n"
                         + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
-                        + (f"🧩 RAID: RAID0 group={disk_group_id}" + (f" ({raid_disks} disks)" if raid_disks else "") + "\n" if raid0 else "")
-                        + f"📋 任务ID: {task_id}\n\n"
+                        + (f"🧩 RAID: `RAID0 group={disk_group_id}" + (f" disks={raid_disks}" if raid_disks else "") + "`\n" if raid0 else "")
+                        + f"📋 任务ID: `{task_id}`\n\n"
                         f"⏳ 安装进行中... 通常需要 5-30 分钟\n"
                         f"💡 可用 `/servers` 查看当前系统变化",
                         parse_mode="Markdown"
