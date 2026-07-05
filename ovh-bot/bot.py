@@ -1392,6 +1392,7 @@ def run_bot(cfg: dict):
             )])
 
         text = f"🛒 *选择要抢购的配置*\n\n型号: `{plan_code}`\n\n点一个配置，再选机房。"
+        buttons.append([InlineKeyboardButton("取消", callback_data="cancel")])
         await msg.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2262,7 +2263,10 @@ def run_bot(cfg: dict):
                 for k in keys[:8]:
                     keyboard.append([InlineKeyboardButton(f"🔑 {k}", callback_data=f"srv|key|{action_id}|{k}")])
                 keyboard.append([InlineKeyboardButton("不使用 SSH key", callback_data=f"srv|key|{action_id}|none")])
-                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"srv|install|{action_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel")
+                ])
                 await query.edit_message_text(
                     f"🔑 选择 SSH 密钥\n\n服务器: {service_name}\n系统: {action['template']}",
                     reply_markup=InlineKeyboardMarkup(keyboard)
@@ -2281,7 +2285,10 @@ def run_bot(cfg: dict):
                     disk_type = dg.get("diskType", "DISK")
                     label = f"RAID0 group={group_id} {disks}x {disk_type} {size_txt}"
                     keyboard.append([InlineKeyboardButton(label, callback_data=f"srv|raid|{action_id}|g{group_id}d{disks}")])
-                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"srv|os|{action_id}|{action['template']}"),
+                    InlineKeyboardButton("取消", callback_data="cancel")
+                ])
                 await query.edit_message_text(
                     f"🧩 选择磁盘方案\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}\n\nRAID0 只会对按钮显示的同一个磁盘组执行，不会混合不同类型磁盘。",
                     reply_markup=InlineKeyboardMarkup(keyboard)
@@ -2322,10 +2329,10 @@ def run_bot(cfg: dict):
                     "raid_disks": action.get("raid_disks"),
                     "disk_group_id": action.get("disk_group_id"),
                 }
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⚠️ 确认安装", callback_data=f"act|{confirm_id}"),
-                    InlineKeyboardButton("取消", callback_data="cancel"),
-                ]])
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚠️ 确认安装", callback_data=f"act|{confirm_id}")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"srv|key|{action_id}|{action.get('ssh_key_name') or 'none'}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ])
                 await query.edit_message_text(
                     f"⚠️ 确认安装系统\n\n"
                     f"服务器: {service_name}\n"
@@ -2638,7 +2645,60 @@ def run_bot(cfg: dict):
             plan_code = session["plan_code"]
             all_configs = session["all_configs"]
 
-            if stage == "cfg" and len(parts) >= 4:
+            if stage == "cfgback":
+                buttons = []
+                for idx, cfg in enumerate(all_configs[:20]):
+                    buttons.append([InlineKeyboardButton(
+                        f"#{idx+1} {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                        callback_data=f"buy|cfg|{session_id}|{idx}"
+                    )])
+                buttons.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    f"🛒 *选择要抢购的配置*\n\n型号: `{plan_code}`",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+
+            elif stage == "dcback":
+                cfg = session.get("selected_cfg")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /buy")
+                    return
+                dcs = list(cfg["datacenters"].items())
+                keyboard = []
+                for dc, status in dcs:
+                    status_cn = format_dc_status(status)
+                    keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"buy|dc|{session_id}|{dc}")])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"buy|cfgback|{session_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel")
+                ])
+                await query.edit_message_text(
+                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif stage == "countback":
+                cfg = session.get("selected_cfg")
+                dc = session.get("selected_dc")
+                if not cfg or not dc:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /buy")
+                    return
+                dc_display = format_dc(dc)
+                keyboard = [
+                    [InlineKeyboardButton("1 单", callback_data=f"buy|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"buy|count|{session_id}|2")],
+                    [InlineKeyboardButton("3 单", callback_data=f"buy|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"buy|count|{session_id}|5")],
+                    [InlineKeyboardButton("10 单", callback_data=f"buy|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"buy|count|{session_id}|custom")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"buy|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ]
+                await query.edit_message_text(
+                    f"🎯 选择下单数量\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n机房: {dc_display}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            elif stage == "cfg" and len(parts) >= 4:
                 idx = int(parts[3])
                 if idx < 0 or idx >= len(all_configs):
                     await query.edit_message_text("❌ 配置已过期，请重新 /buy")
@@ -2651,7 +2711,10 @@ def run_bot(cfg: dict):
                 for dc, status in dcs:
                     status_cn = format_dc_status(status)
                     keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"buy|dc|{session_id}|{dc}")])
-                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"buy|cfgback|{session_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel")
+                ])
                 title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
                 if not dcs:
                     title = f"📍 这个配置没有可选机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
@@ -2674,7 +2737,7 @@ def run_bot(cfg: dict):
                     [InlineKeyboardButton("1 单", callback_data=f"buy|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"buy|count|{session_id}|2")],
                     [InlineKeyboardButton("3 单", callback_data=f"buy|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"buy|count|{session_id}|5")],
                     [InlineKeyboardButton("10 单", callback_data=f"buy|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"buy|count|{session_id}|custom")],
-                    [InlineKeyboardButton("取消", callback_data="cancel")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"buy|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ]
                 await query.edit_message_text(
                     f"🎯 选择下单数量\n\n"
@@ -2704,10 +2767,10 @@ def run_bot(cfg: dict):
                     "memory": cfg.get("memory"),
                     "count": session.get("count", 1),
                 }
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🛒 确认开始抢购", callback_data=f"act|{confirm_id}"),
-                    InlineKeyboardButton("取消", callback_data="cancel"),
-                ]])
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛒 确认开始抢购", callback_data=f"act|{confirm_id}")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"buy|countback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ])
                 await query.edit_message_text(
                     f"🛒 确认开始抢购\n\n"
                     f"型号: `{plan_code}`\n"
