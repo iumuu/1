@@ -773,6 +773,77 @@ class OVHClient:
     def get_order_status(self, order_id: int) -> str:
         return self.get(f"/me/order/{order_id}/status")
 
+    def get_order_details(self, order_id: int) -> dict:
+        """获取订单详细信息 (含价格、商品明细)"""
+        result = {"order_id": order_id, "status": None, "date": None,
+                  "tax_rate": None, "payment_url": None, "items": [], "total": None}
+
+        # 基本信息
+        try:
+            order = self.get(f"/me/order/{order_id}")
+            result["status"] = order.get("status")
+            result["date"] = order.get("date")
+            result["tax_rate"] = order.get("taxRate")
+        except Exception:
+            pass
+
+        # 付款链接
+        result["payment_url"] = self.get_payment_url(order_id)
+
+        # 商品明细
+        try:
+            items = self.get(f"/me/order/{order_id}/item")
+            if isinstance(items, list):
+                for item_id in items:
+                    try:
+                        detail = self.get(f"/me/order/{order_id}/item/{item_id}")
+                        result["items"].append({
+                            "description": detail.get("description", ""),
+                            "domain": detail.get("domain", ""),
+                            "unit_price": detail.get("unitPrice", {}).get("value"),
+                            "quantity": detail.get("quantity", 1),
+                            "total_price": detail.get("totalPrice", {}).get("value"),
+                        })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 关联的账单
+        try:
+            bill = self.get(f"/me/order/{order_id}/associatedBill")
+            if isinstance(bill, dict):
+                result["bill_id"] = bill.get("billId")
+                result["bill_url"] = bill.get("url")
+        except Exception:
+            pass
+
+        return result
+
+    def list_recent_orders(self, count: int = 10) -> list:
+        """获取最近的订单列表"""
+        try:
+            orders = self.get("/me/order")
+            if isinstance(orders, list):
+                # OVH 返回的是 orderId 列表，倒序取最近的
+                orders_sorted = sorted(orders, reverse=True)
+                recent = orders_sorted[:count]
+                result = []
+                for oid in recent:
+                    try:
+                        info = self.get(f"/me/order/{oid}")
+                        result.append({
+                            "order_id": oid,
+                            "status": info.get("status"),
+                            "date": info.get("date"),
+                        })
+                    except Exception:
+                        result.append({"order_id": oid, "status": "?", "date": None})
+                return result
+        except Exception:
+            pass
+        return []
+
     def get_payment_url(self, order_id: int) -> str:
         """获取订单付款链接"""
         try:
@@ -1165,7 +1236,8 @@ def run_bot(cfg: dict):
             "/watchlist — 查看当前监控列表\n\n"
             "💳 *订单类:*\n"
             "/pay orderId — 获取付款链接\n"
-            "/status orderId — 订单状态\n"
+            "/status — 查看最近 10 笔订单\n"
+            "/status orderId — 查看订单详情\n"
             "/catalog — 查看服务器目录\n\n"
             "💡 直接转发 OVH 服务器信息也可自动下单！\n"
             f"🌐 当前区域: {ovh_client.zone} / {ovh_client.subsidiary}",
@@ -1631,20 +1703,86 @@ def run_bot(cfg: dict):
     async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user(update.effective_user.id):
             return
+
         if not context.args:
-            await update.message.reply_text("用法: /status <orderId>")
+            # 无参数 → 列出最近订单
+            try:
+                await update.message.reply_text("⏳ 正在查询最近订单...")
+                orders = ovh_client.list_recent_orders(10)
+                if not orders:
+                    await update.message.reply_text("📭 没有找到订单")
+                    return
+
+                status_emoji = {
+                    "delivered": "✅", "paid": "💰", "pendingPayment": "⏳",
+                    "pending_debit_validation": "⏳", "validatingPayment": "🔄",
+                    "canceled": "❌", "expired": "💀", "unknown": "❓",
+                }
+                lines = ["📋 *最近订单*\n"]
+                for o in orders:
+                    emoji = status_emoji.get(o["status"], "📌")
+                    date_str = to_bjt(o["date"]) if o.get("date") else "N/A"
+                    lines.append(f"{emoji} `{o['order_id']}` - {o['status']} - {date_str}")
+                lines.append(f"\n💡 用 `/status <订单号>` 查看详情")
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ 查询失败: {e}")
             return
 
         try:
             order_id = int(context.args[0])
-            order = ovh_client.get_order(order_id)
-            status = ovh_client.get_order_status(order_id)
-            text = (
-                f"📋 订单 {order_id}\n\n"
-                f"状态: {status}\n"
-                f"日期: {to_bjt(order.get('date', 'N/A'))}"
-            )
-            await update.message.reply_text(text)
+        except ValueError:
+            await update.message.reply_text("❌ 订单号必须是数字\n用法: /status 254452143")
+            return
+
+        try:
+            await update.message.reply_text(f"⏳ 正在查询订单 {order_id}...")
+
+            detail = ovh_client.get_order_details(order_id)
+            status = detail.get("status", "unknown")
+            status_emoji = {
+                "delivered": "✅ 已交付", "paid": "💰 已付款",
+                "pendingPayment": "⏳ 待付款", "pending_debit_validation": "⏳ 待验证",
+                "validatingPayment": "🔄 验证付款中", "canceled": "❌ 已取消",
+                "expired": "💀 已过期", "unknown": "❓ 未知",
+            }.get(status, f"📌 {status}")
+
+            lines = [f"📋 *订单 {order_id}*\n"]
+            lines.append(f"状态: {status_emoji}")
+            if detail.get("date"):
+                lines.append(f"日期: {to_bjt(detail['date'])}")
+            if detail.get("tax_rate") is not None:
+                lines.append(f"税率: {detail['tax_rate']}%")
+
+            # 商品明细
+            items = detail.get("items", [])
+            if items:
+                lines.append("\n*商品明细:*")
+                total_calc = 0
+                for item in items:
+                    desc = item["description"][:50] if item["description"] else item.get("domain", "N/A")
+                    qty = item.get("quantity", 1)
+                    price = item.get("total_price")
+                    if price is not None:
+                        total_calc += price
+                        lines.append(f"  • {desc} x{qty} - €{price:.2f}")
+                    else:
+                        lines.append(f"  • {desc} x{qty}")
+                if total_calc > 0:
+                    lines.append(f"\n💰 总计: €{total_calc:.2f}")
+
+            # 付款链接
+            pay_url = detail.get("payment_url")
+            if pay_url and status in ("pendingPayment", "pending_debit_validation", "validatingPayment"):
+                lines.append(f"\n💳 [点击付款]({pay_url})")
+
+            # 账单
+            if detail.get("bill_id"):
+                lines.append(f"\n🧾 账单号: {detail['bill_id']}")
+            if detail.get("bill_url"):
+                lines.append(f"📄 [查看账单]({detail['bill_url']})")
+
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         except Exception as e:
             await update.message.reply_text(f"❌ 查询失败: {e}")
 
