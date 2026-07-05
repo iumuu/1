@@ -1216,21 +1216,46 @@ DATACENTER_MAP = {
 }
 
 DC_DISPLAY_MAP = {
-    "bhs": "🇨🇦 Beauharnois (加拿大)",
-    "gra": "🇫🇷 Gravelines (法国)",
-    "sbg": "🇫🇷 Strasbourg (法国)",
-    "rbx": "🇫🇷 Roubaix (法国)",
-    "par": "🇫🇷 Paris (法国)",
-    "fra": "🇩🇪 Frankfurt (德国)",
-    "lon": "🇬🇧 London (英国)",
-    "waw": "🇵🇱 Warsaw (波兰)",
-    "eri": "🇩🇪 Erlangen (德国)",
-    "vin": "🇺🇸 Vint Hill (美国)",
-    "hil": "🇩🇪 Hillersdorf (德国)",
-    "sgp": "🇸🇬 Singapore (新加坡)",
-    "syd": "🇦🇺 Sydney (澳大利亚)",
-    "ynm": "🇮🇳 Mumbai (印度)",
+    "bhs": "🇨🇦 博阿努瓦",
+    "gra": "🇫🇷 格拉沃利讷",
+    "sbg": "🇫🇷 斯特拉斯堡",
+    "rbx": "🇫🇷 鲁贝",
+    "par": "🇫🇷 巴黎",
+    "fra": "🇩🇪 法兰克福",
+    "lon": "🇬🇧 伦敦",
+    "waw": "🇵🇱 华沙",
+    "eri": "🇩🇪 埃尔朗根",
+    "vin": "🇺🇸 文特希尔",
+    "hil": "🇩🇪 希勒斯多夫",
+    "sgp": "🇸🇬 新加坡",
+    "syd": "🇦🇺 悉尼",
+    "ynm": "🇮🇳 孟买",
 }
+
+STATUS_CN_MAP = {
+    "unavailable": "无货",
+    "unknown": "未知",
+    "available": "有货",
+    "1H": "少量",
+    "72H": "72小时",
+    "restock": "补货中",
+    "comingSoon": "即将到货",
+}
+
+
+def format_dc_status(status: str) -> str:
+    """将 OVH 状态翻译成中文"""
+    if not status:
+        return "未知"
+    s = status.lower()
+    if s in UNAVAILABLE_STATES:
+        return "无货"
+    return STATUS_CN_MAP.get(s, "有货" if s != "unavailable" else "无货")
+
+
+def format_dc(dc: str) -> str:
+    """返回中文机房名"""
+    return DC_DISPLAY_MAP.get(dc, dc)
 
 
 def parse_plan_code(text: str):
@@ -2317,8 +2342,10 @@ def run_bot(cfg: dict):
 
                 dcs = list(cfg["datacenters"].items())
                 keyboard = []
+                keyboard.append([InlineKeyboardButton("🌐 全部机房", callback_data=f"watch|dc|{session_id}|all")])
                 for dc, status in dcs:
-                    keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"watch|dc|{session_id}|{dc}")])
+                    status_cn = format_dc_status(status)
+                    keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"watch|dc|{session_id}|{dc}")])
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
                 if not dcs:
@@ -2335,7 +2362,11 @@ def run_bot(cfg: dict):
                 if not cfg:
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
-                session["selected_dc"] = dc
+                if dc == "all":
+                    session["selected_dc"] = None
+                else:
+                    session["selected_dc"] = dc
+                dc_display = "全部机房" if dc == "all" else format_dc(dc)
 
                 keyboard = [
                     [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
@@ -2347,7 +2378,7 @@ def run_bot(cfg: dict):
                     f"🎯 选择下单数量\n\n"
                     f"型号: `{plan_code}`\n"
                     f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc}",
+                    f"机房: {dc_display}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -2357,9 +2388,10 @@ def run_bot(cfg: dict):
                 session["max_orders"] = 1 if val == "custom" else int(val)
                 cfg = session.get("selected_cfg")
                 dc = session.get("selected_dc")
-                if not cfg or not dc:
-                    await query.edit_message_text("❌ 会话状态丢失，请先选择机房")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
+                dc_display = "全部机房" if dc is None else format_dc(dc)
                 confirm_id = str(int(time.time() * 1000))[-10:]
                 pending_actions[confirm_id] = {
                     "type": "watch_start",
@@ -2378,7 +2410,7 @@ def run_bot(cfg: dict):
                     f"📡 确认开始监控\n\n"
                     f"型号: `{plan_code}`\n"
                     f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc}\n"
+                    f"机房: {dc_display}\n"
                     f"下单上限: {session.get('max_orders', 1)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
@@ -2406,7 +2438,8 @@ def run_bot(cfg: dict):
                 dcs = list(cfg["datacenters"].items())
                 keyboard = []
                 for dc, status in dcs:
-                    keyboard.append([InlineKeyboardButton(f"{dc} {status}", callback_data=f"buy|dc|{session_id}|{dc}")])
+                    status_cn = format_dc_status(status)
+                    keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"buy|dc|{session_id}|{dc}")])
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
                 if not dcs:
@@ -2424,6 +2457,7 @@ def run_bot(cfg: dict):
                     await query.edit_message_text("❌ 会话状态丢失，请先选择配置")
                     return
                 session["selected_dc"] = dc
+                dc_display = format_dc(dc)
 
                 keyboard = [
                     [InlineKeyboardButton("1 单", callback_data=f"buy|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"buy|count|{session_id}|2")],
@@ -2435,7 +2469,7 @@ def run_bot(cfg: dict):
                     f"🎯 选择下单数量\n\n"
                     f"型号: `{plan_code}`\n"
                     f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc}",
+                    f"机房: {dc_display}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -2448,6 +2482,7 @@ def run_bot(cfg: dict):
                 if not cfg or not dc:
                     await query.edit_message_text("❌ 会话状态丢失，请先选择机房")
                     return
+                dc_display = format_dc(dc)
                 confirm_id = str(int(time.time() * 1000))[-10:]
                 pending_actions[confirm_id] = {
                     "type": "buy_start",
@@ -2466,7 +2501,7 @@ def run_bot(cfg: dict):
                     f"🛒 确认开始抢购\n\n"
                     f"型号: `{plan_code}`\n"
                     f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc}\n"
+                    f"机房: {dc_display}\n"
                     f"下单数量: {session.get('count', 1)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
@@ -2512,7 +2547,7 @@ def run_bot(cfg: dict):
                     asyncio.ensure_future(watch_monitor_loop())
                 await query.edit_message_text(
                     f"📡 *开始监控* `{plan_code}`\n\n"
-                    f"📍 机房: {action.get('dc')}\n"
+                    f"📍 机房: {format_dc(action.get('dc')) if action.get('dc') else '全部机房'}\n"
                     f"📦 配置: {format_memory(action.get('memory'))} + {format_storage(action.get('storage'))}\n"
                     f"🎯 下单上限: {action.get('max_orders', 1)}\n"
                     f"📊 已下: 0 单\n\n"
