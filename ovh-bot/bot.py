@@ -305,15 +305,14 @@ def storage_matches(storage_raw: str, target: str) -> bool:
             return prefix in s and "nvme" in s
         return t in s
 
-    # HDD 精确匹配: 2x4hdd → 查找 2x4000sa (4TB = 4000)
-    if re.match(r'\d+x\d+hdd$', t):
-        m = re.match(r'(\d+)x(\d+)hdd$', t)
-        if m:
-            count = m.group(1)
-            tb_val = int(m.group(2))
-            sa_val = str(tb_val * 1000)
-            return f"{count}x{sa_val}" in s and "sa" in s
-        return t in s
+    # HDD/SATA 精确匹配: 2x4hdd / 2x4tb / 2x4000sa → 查找 2x4000sa
+    hdd_m = re.match(r'^(\d+)x(\d+)(?:hdd|tb|tbs|sa)?$', t)
+    if hdd_m and "nvme" not in t and "ssd" not in t:
+        count = hdd_m.group(1)
+        size_val = int(hdd_m.group(2))
+        # 小于 100 视为 TB，转成 OVH SATA/SAS 的 GB 数字；大于等于 100 视为 GB
+        sa_val = str(size_val * 1000 if size_val < 100 else size_val)
+        return f"{count}x{sa_val}" in s and "sa" in s
 
     # 无法解析时不放行，避免 2x450nvme 错落到其它存储
     return OVHClient._standardize(raw) == OVHClient._standardize(tgt)
