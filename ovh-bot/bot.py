@@ -2078,13 +2078,23 @@ def run_bot(cfg: dict):
                 await msg.edit_text("📭 没有找到独立服务器")
                 return
 
-            lines = [f"🖥️ 独立服务器列表 ({len(servers)} 台)\n"]
-            keyboard = []
-            for i, s in enumerate(servers):
-                state_emoji = {"ok": "🟢", "error": "🔴"}.get(s.get("state", ""), "🟡")
+            server_items = []
+            for s in servers:
                 hw = ovh_client.get_server_hardware(s["name"])
                 disk_groups = hw.get("diskGroups", []) if isinstance(hw, dict) else []
+                if not disk_groups:
+                    continue
                 default_group = hw.get("defaultDiskGroupId") if isinstance(hw, dict) else None
+                server_items.append((s, disk_groups, default_group))
+
+            if not server_items:
+                await msg.edit_text("📭 没有找到带磁盘组信息的独立服务器")
+                return
+
+            lines = [f"🖥️ 独立服务器列表 ({len(server_items)} 台，已隐藏无磁盘组机器)\n"]
+            keyboard = []
+            for i, (s, disk_groups, default_group) in enumerate(server_items):
+                state_emoji = {"ok": "🟢", "error": "🔴"}.get(s.get("state", ""), "🟡")
 
                 lines.append(f"{state_emoji} {i+1}. {s['name']}")
                 lines.append(f"   📦 {s.get('commercial_range','?')}")
