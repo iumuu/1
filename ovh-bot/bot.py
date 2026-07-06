@@ -31,11 +31,6 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10 fallback
-    tomllib = None
-
 # 北京时区 (UTC+8)
 BJT = timezone(timedelta(hours=8))
 
@@ -75,11 +70,7 @@ CONFIG_PATHS = [
 
 
 def parse_toml_simple(path: str) -> dict:
-    """解析 TOML 配置；优先使用标准库，Python 3.10 回退到简易解析器。"""
-    if tomllib is not None:
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-
+    """简易 TOML 解析器"""
     config = {}
     current_section = None
     with open(path, "r", encoding="utf-8") as f:
@@ -119,34 +110,6 @@ def parse_toml_simple(path: str) -> dict:
     return config
 
 
-def parse_allowed_users(value) -> list[int]:
-    """将 TG_ALLOWED_USERS/config allowed_users 解析为整数列表，忽略无效项。"""
-    if not value:
-        return []
-    if isinstance(value, str):
-        raw_items = value.split(",")
-    elif isinstance(value, (list, tuple, set)):
-        raw_items = value
-    else:
-        raw_items = [value]
-
-    users = []
-    for raw in raw_items:
-        text = str(raw).strip()
-        if not text:
-            continue
-        try:
-            users.append(int(text))
-        except ValueError:
-            logger.warning(f"忽略无效 Telegram 用户 ID: {text}")
-    return users
-
-
-def parse_bool_env(value: str) -> bool:
-    """解析布尔环境变量。"""
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
 def load_config() -> dict:
     """加载配置，优先级: 环境变量 > config.toml > 默认值"""
     # 按优先级查找配置文件
@@ -179,17 +142,15 @@ def load_config() -> dict:
     if users_str:
         if "telegram" not in cfg:
             cfg["telegram"] = {}
-        cfg["telegram"]["allowed_users"] = parse_allowed_users(users_str)
+        cfg["telegram"]["allowed_users"] = [int(u.strip()) for u in users_str.split(",") if u.strip()]
 
     # config.toml 中的 allowed_users 格式修正
     if "telegram" in cfg and "allowed_users" in cfg["telegram"]:
-        cfg["telegram"]["allowed_users"] = parse_allowed_users(cfg["telegram"]["allowed_users"])
-
-    allow_all_users = os.environ.get("TG_ALLOW_ALL_USERS", "")
-    if allow_all_users:
-        if "telegram" not in cfg:
-            cfg["telegram"] = {}
-        cfg["telegram"]["allow_all_users"] = parse_bool_env(allow_all_users)
+        users = cfg["telegram"]["allowed_users"]
+        if isinstance(users, str):
+            cfg["telegram"]["allowed_users"] = [int(u.strip()) for u in users.split(",") if u.strip()]
+        elif isinstance(users, list):
+            cfg["telegram"]["allowed_users"] = [int(u) for u in users]
 
     # 默认值
     if "ovh" not in cfg:
@@ -1378,25 +1339,17 @@ def run_bot(cfg: dict):
     tg_cfg = cfg.get("telegram", {})
     bot_token = tg_cfg.get("bot_token", "")
     allowed_users = tg_cfg.get("allowed_users", [])
-    allow_all_users = bool(tg_cfg.get("allow_all_users", False))
     bot_app = None
 
     if not bot_token:
         logger.error("未配置 Telegram Bot Token")
         sys.exit(1)
 
-    if allow_all_users:
-        logger.warning("Telegram allow_all_users=true，所有用户都可以操作 Bot")
-    elif not allowed_users:
-        logger.error("未配置 telegram.allowed_users，默认拒绝所有 Telegram 用户")
-
     ovh_client = OVHClient(cfg)
 
     def check_user(user_id: int) -> bool:
-        if allow_all_users:
-            return True
         if not allowed_users:
-            return False
+            return True
         return user_id in allowed_users
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1616,7 +1569,7 @@ def run_bot(cfg: dict):
     # 监控任务: {plan_code: {"dc": str|None, "storage": str|None, "memory": str|None,
     #                         "max_orders": int, "ordered": int, "active": bool}}
     import os as _os
-    DATA_DIR = _os.environ.get("OVH_BOT_DATA_DIR") or str(Path(__file__).parent / "data")
+    DATA_DIR = _os.environ.get("OVH_BOT_DATA_DIR", "/app/data")
     WATCH_FILE = _os.path.join(DATA_DIR, "watch_tasks.json")
 
     def save_watch_tasks():
@@ -2277,16 +2230,13 @@ def run_bot(cfg: dict):
         """处理内联按钮回调 - 支持带存储类型的下单"""
         nonlocal watch_running
         query = update.callback_query
+        await query.answer()
 
         if not check_user(query.from_user.id):
             await query.answer("⛔ 未授权", show_alert=True)
             return
 
         data = query.data
-        if data.startswith("act|"):
-            await query.answer("正在处理，请稍等...", cache_time=0)
-        else:
-            await query.answer()
         parts = data.split("|")
 
         if parts[0] == "buy" and len(parts) >= 3 and parts[1] == "preset":
@@ -2937,12 +2887,10 @@ def run_bot(cfg: dict):
 
         elif parts[0] == "act" and len(parts) >= 2:
             action_id = parts[1]
-            action = pending_actions.get(action_id)
+            action = pending_actions.pop(action_id, None)
             if not action:
                 await query.edit_message_text("❌ 操作已过期，请重新发起")
                 return
-            if action.get("type") != "watch_start":
-                pending_actions.pop(action_id, None)
 
             if action["type"] == "buy_start":
                 plan_code = action["plan_code"]
@@ -2997,23 +2945,18 @@ def run_bot(cfg: dict):
                     "_last_order_time": {},
                 }
                 save_watch_tasks()
-                text = (
+                if not watch_running:
+                    watch_running = True
+                    asyncio.ensure_future(watch_monitor_loop())
+                await query.edit_message_text(
                     f"📡 *开始监控* `{plan_code}`\n\n"
                     f"📍 机房: {format_dc(action.get('dc')) if action.get('dc') else '全部机房'}\n"
                     f"📦 配置: {format_memory(action.get('memory'))} + {format_storage(action.get('storage'))}\n"
                     f"🎯 下单上限: {action.get('max_orders', 1)}\n"
                     f"📊 已下: 0 单\n\n"
-                    f"💡 达到上限后自动停止"
+                    f"💡 达到上限后自动停止",
+                    parse_mode="Markdown"
                 )
-                try:
-                    await query.edit_message_text(text, parse_mode="Markdown")
-                except Exception as e:
-                    logger.warning(f"编辑监控确认消息失败，改发新消息: {e}")
-                    await query.message.reply_text(text, parse_mode="Markdown")
-                pending_actions.pop(action_id, None)
-                if not watch_running:
-                    watch_running = True
-                    asyncio.ensure_future(watch_monitor_loop())
 
             elif action["type"] == "reinstall":
                 service_name = action["service_name"]

@@ -18,8 +18,6 @@ zone = "IE"
 bot_token = ""
 # 允许使用的用户 ID（你的 TG 用户 ID），多个用逗号分隔
 allowed_users = []
-# 是否允许所有 Telegram 用户操作 Bot。生产环境请保持 false
-allow_all_users = false
 # 监控通知的 chat_id（可以是你的用户 ID 或群组 ID）
 chat_id = ""
 
@@ -29,8 +27,8 @@ chat_id = ""
 watch_list = []
 # 检查间隔（秒），建议 10-30
 interval = 10
-# 发现有货时自动下单（true）还是只通知（false）。维护默认更安全：false
-auto_buy = false
+# 发现有货时自动下单（true）还是只通知（false）
+auto_buy = true
 # 限制只监控特定数据中心，留空表示监控全部
 # 例如: "fra" 只监控法兰克福
 datacenter = ""

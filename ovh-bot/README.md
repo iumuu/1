@@ -6,45 +6,13 @@
 
 - 🌐 **支持 IE/EU/CA/US 所有区域**（IE 区价格最优）
 - 📦 **指定存储/内存下单** — 不会再下成错误的 HDD/NVMe 配置
-- 📡 **内置监控** — 可设下单次数，到量自动停；独立监控默认只通知，需显式开启自动下单
+- 📡 **内置监控** — 有货自动下单，可设下单次数，到量自动停
 - 🔍 **全配置检测** — 修复旧脚本只看第一个配置的 BUG
 - 📊 **价格显示** — `/check` 有货配置实时查价
 - 🏷️ **友好名称** — `/buy ks-1-b fra nvme` 代替难记的 planCode
 - 💬 **转发即下单** — 直接转发 OVH 到货信息自动识别下单
 
 ## 🚀 Docker 部署（推荐）
-
-### GitHub 自动推送 Docker Hub
-
-仓库根目录已内置 GitHub Actions 工作流：`.github/workflows/docker-publish.yml`。
-
-在 GitHub 仓库设置两个 Secrets：
-
-| Secret | 说明 |
-|------|------|
-| `DOCKERHUB_USERNAME` | Docker Hub 用户名，例如 `gvddfdf` |
-| `DOCKERHUB_TOKEN` | Docker Hub Access Token，不要使用账号密码 |
-
-推送到 `master` 后会自动构建 `ovh-bot/Dockerfile` 并推送：
-
-```text
-DOCKERHUB_USERNAME/ovh-bot:latest
-DOCKERHUB_USERNAME/ovh-bot:master
-DOCKERHUB_USERNAME/ovh-bot:sha-xxxxxxx
-```
-
-打版本标签也会推送对应 tag：
-
-```bash
-git tag v2.1.0
-git push origin v2.1.0
-```
-
-部署时可以在 `.env` 中指定镜像：
-
-```bash
-DOCKER_IMAGE=gvddfdf/ovh-bot:latest
-```
 
 ### 方式 1：docker-compose
 
@@ -54,8 +22,15 @@ git clone https://github.com/iumuu/1.git ovh-bot
 cd ovh-bot/ovh-bot
 
 # 2. 创建环境变量文件
-cp .env.example .env
-# 编辑 .env，填入 OVH、Telegram 和 DOCKER_IMAGE
+cat > .env << 'EOF'
+OVH_APPLICATION_KEY=你的Application_Key
+OVH_APPLICATION_SECRET=你的Application_Secret
+OVH_CONSUMER_KEY=你的Consumer_Key
+OVH_ZONE=IE
+TG_BOT_TOKEN=你的Bot_Token
+TG_ALLOWED_USERS=你的TG用户ID
+TG_CHAT_ID=你的TG_Chat_ID
+EOF
 
 # 3. 构建并启动
 docker compose up -d --build
@@ -81,7 +56,6 @@ docker run -d --name ovh-bot --restart unless-stopped \
   -e OVH_ZONE=IE \
   -e TG_BOT_TOKEN=你的Bot_Token \
   -e TG_ALLOWED_USERS=你的TG用户ID \
-  -e TG_ALLOW_ALL_USERS=false \
   -e TG_CHAT_ID=你的TG_Chat_ID \
   ovh-bot
 
@@ -129,7 +103,6 @@ docker run -d --name ovh-monitor --restart unless-stopped \
   -e OVH_ZONE=IE \
   -e TG_BOT_TOKEN=你的Bot_Token \
   -e TG_ALLOWED_USERS=你的TG用户ID \
-  -e TG_ALLOW_ALL_USERS=false \
   -e TG_CHAT_ID=你的TG_Chat_ID \
   ovh-bot python3 monitor.py ks-1-b ks-stor
 ```
@@ -167,11 +140,7 @@ zone = "IE"                # 关键！决定下单区域
 [telegram]
 bot_token = "你的Bot_Token"
 allowed_users = [你的TG用户ID]
-allow_all_users = false
 chat_id = "你的TG_Chat_ID"
-
-[monitor]
-auto_buy = false   # 独立 monitor.py 默认只通知；确认后再改 true
 ```
 
 ### 启动
@@ -186,7 +155,6 @@ python3 bot.py buy ks-1-b --dc fra
 
 # 监控模式
 python3 monitor.py ks-1-b ks-stor
-python3 monitor.py --dc fra --interval 15 --auto-buy ks-1-b
 ```
 
 ## 🔑 获取凭证
@@ -206,8 +174,6 @@ python3 monitor.py --dc fra --interval 15 --auto-buy ks-1-b
 
 1. @BotFather → `/newbot` → 获取 Bot Token
 2. @userinfobot → 获取你的 User ID
-
-> 安全提示：未配置 `allowed_users` 时，Bot 默认拒绝所有 Telegram 用户。只有明确设置 `allow_all_users = true` 或 `TG_ALLOW_ALL_USERS=true` 才会放开访问。
 
 ## 📖 命令说明
 
@@ -279,15 +245,12 @@ python3 monitor.py --dc fra --interval 15 --auto-buy ks-1-b
 
 ```
 ovh-bot/
-├── .env.example           # 环境变量示例
 ├── bot.py                 # 主脚本（TG Bot + CLI）
 ├── monitor.py             # 独立监控脚本
 ├── Dockerfile             # Docker 镜像
 ├── docker-compose.yml     # Docker Compose
 ├── requirements.txt       # Python 依赖
 ├── config.example.toml    # 配置模板
-├── GITHUB_DEPLOY.md       # GitHub 自动推 Docker Hub 步骤
-├── MAINTENANCE.md         # 维护说明
 └── README.md              # 本文件
 ```
 

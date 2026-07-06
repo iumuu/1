@@ -1,10 +1,6 @@
-.env
-config.toml
-data/
 __pycache__/
-*.py[cod]
-*.log
-.git/
-.venv/
-venv/
-*.zip
+*.pyc
+config.toml
+.git
+.gitignore
+README.md
