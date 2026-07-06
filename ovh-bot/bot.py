@@ -871,6 +871,13 @@ class OVHClient:
         except Exception:
             return []
 
+    def get_server_info(self, service_name: str) -> dict:
+        """获取单台服务器详情"""
+        try:
+            return self.get(f"/dedicated/server/{service_name}")
+        except Exception:
+            return {}
+
     def get_server_hardware(self, service_name: str) -> dict:
         """获取服务器硬件规格，含 diskGroups"""
         try:
@@ -1782,6 +1789,13 @@ def run_bot(cfg: dict):
                 elapsed = int(time.time() - start_ts)
                 status_obj = ovh_client.get_install_status(service_name)
                 status_text, percent, done = _extract_install_progress(status_obj, elapsed)
+                server_info = ovh_client.get_server_info(service_name)
+                current_os = str(server_info.get("os", "")) if isinstance(server_info, dict) else ""
+                template_base = template.split("_")[0]
+                if current_os and (current_os == template or template in current_os or template_base in current_os):
+                    status_text = f"安装完成，当前系统: {current_os}"
+                    percent = 100
+                    done = True
                 bar = _progress_bar(percent)
                 mins, secs = divmod(elapsed, 60)
                 text = (
@@ -2091,7 +2105,7 @@ def run_bot(cfg: dict):
                 await msg.edit_text("📭 没有找到带磁盘组信息的独立服务器")
                 return
 
-            lines = [f"🖥️ 独立服务器列表 ({len(server_items)} 台，已隐藏无磁盘组机器)\n"]
+            lines = [f"🖥️ 独立服务器列表 ({len(server_items)} 台)\n"]
             keyboard = []
             for i, (s, disk_groups, default_group) in enumerate(server_items):
                 state_emoji = {"ok": "🟢", "error": "🔴"}.get(s.get("state", ""), "🟡")
