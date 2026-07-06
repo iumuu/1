@@ -14,8 +14,10 @@ services:
       - TG_BOT_TOKEN=8771867858:AAGuonJsnsf9bcS_NV_LRErWPNUl8_wKBp8
       - TG_ALLOWED_USERS=5113786725
       - TG_CHAT_ID=5113786725
+    volumes:
+      # 固定持久化目录：监控任务保存在 ./data/watch_tasks.json，重建/更新容器不丢
+      - ./data:/app/data
     # 也可以用配置文件（二选一，注释掉 environment 即可）
-    # volumes:
     #   - ./config.toml:/app/data/config.toml:ro
 
   # 可选：监控模式
