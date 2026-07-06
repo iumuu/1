@@ -912,7 +912,9 @@ class OVHClient:
 
     def reinstall_server(self, service_name: str, template: str, hostname: str = None,
                          ssh_key_name: str = None, raid0: bool = False,
-                         raid_disks: int = None, disk_group_id: int = None) -> dict:
+                         raid_disks: int = None, disk_group_id: int = None,
+                         data_raid0: bool = False, data_disk_group_id: int = None,
+                         data_raid_disks: int = None) -> dict:
         """重装系统 - 返回 task 信息"""
         body = {"operatingSystem": template}
         customizations = {}
@@ -922,6 +924,7 @@ class OVHClient:
             customizations["sshKey"] = self.get_ssh_key_value(ssh_key_name)
         if customizations:
             body["customizations"] = customizations
+        storage_config = []
         if raid0:
             partitioning = {
                 "layout": [
@@ -930,11 +933,23 @@ class OVHClient:
             }
             if raid_disks is not None:
                 partitioning["disks"] = raid_disks
-            storage = {"diskGroupId": disk_group_id, "partitioning": partitioning}
-            body["storage"] = [storage]
+            storage_config.append({"diskGroupId": disk_group_id, "partitioning": partitioning})
         elif disk_group_id is not None:
             # 指定系统安装到某个磁盘组，但不做 RAID0；用于混合盘机器选择 NVMe 系统盘
-            body["storage"] = [{"diskGroupId": disk_group_id}]
+            storage_config.append({"diskGroupId": disk_group_id})
+
+        if data_raid0 and data_disk_group_id is not None:
+            data_partitioning = {
+                "layout": [
+                    {"mountPoint": "/data", "fileSystem": "ext4", "raidLevel": 0, "size": 0}
+                ],
+            }
+            if data_raid_disks is not None:
+                data_partitioning["disks"] = data_raid_disks
+            storage_config.append({"diskGroupId": data_disk_group_id, "partitioning": data_partitioning})
+
+        if storage_config:
+            body["storage"] = storage_config
         return self.post(f"/dedicated/server/{service_name}/reinstall", **body)
 
     def reboot_server(self, service_name: str) -> dict:
@@ -2449,6 +2464,22 @@ def run_bot(cfg: dict):
                         warn = "⚠️ HDD RAID0系统盘" if not is_nvme else "RAID0 NVMe系统盘"
                         label = f"{warn} group={group_id} {disks}x {disk_type} {size_txt}"
                         keyboard.append([InlineKeyboardButton(label, callback_data=f"srv|raid|{action_id}|g{group_id}d{disks}")])
+
+                # 混合盘推荐：NVMe 做系统盘，HDD 多盘组做 /data RAID0
+                nvme_groups = [x for x in action.get("disk_groups", []) if "nvme" in str(x.get("diskType", "")).lower()]
+                hdd_groups = [x for x in action.get("disk_groups", []) if "nvme" not in str(x.get("diskType", "")).lower() and (x.get("numberOfDisks") or 0) >= 2]
+                if nvme_groups and hdd_groups:
+                    sys_g = nvme_groups[0]
+                    data_g = hdd_groups[0]
+                    sys_id = sys_g.get("diskGroupId")
+                    data_id = data_g.get("diskGroupId")
+                    data_disks = data_g.get("numberOfDisks") or 0
+                    data_size = data_g.get("diskSize", {})
+                    data_size_txt = f"{data_size.get('value','?')}{data_size.get('unit','')}"
+                    keyboard.insert(0, [InlineKeyboardButton(
+                        f"⭐ NVMe系统盘 + HDD RAID0数据盘 /data ({data_disks}x{data_size_txt})",
+                        callback_data=f"srv|raid|{action_id}|combo{sys_id}_{data_id}_{data_disks}"
+                    )])
                 if not keyboard:
                     keyboard = [[InlineKeyboardButton("默认分区 / 无 RAID", callback_data=f"srv|raid|{action_id}|none")]]
                 keyboard.append([
@@ -2458,15 +2489,38 @@ def run_bot(cfg: dict):
                 await query.edit_message_text(
                     f"🧩 选择系统安装磁盘\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}\n\n"
                     f"说明:\n"
+                    f"⭐ 推荐组合 = NVMe 挂 /，HDD 组 RAID0 挂 /data\n"
                     f"✅ 系统盘 = 系统安装到该磁盘组，不做 RAID0\n"
                     f"⚠️ RAID0系统盘 = 系统直接安装到该磁盘组的 RAID0 上，不是额外数据盘\n"
-                    f"混合盘机器建议选 NVMe 系统盘，HDD 进系统后再手动组数据盘。",
+                    f"混合盘机器建议选 ⭐ 推荐组合。",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
             elif op == "raid" and len(parts) >= 4:
                 mode = parts[3]
-                if mode.startswith("sys"):
+                if mode.startswith("combo"):
+                    try:
+                        sys_part, data_part, disks_part = mode[5:].split("_", 2)
+                        sys_group_id = int(sys_part)
+                        data_group_id = int(data_part)
+                        data_disks = int(disks_part)
+                    except ValueError:
+                        await query.edit_message_text("❌ 磁盘方案参数无效，请重新 /servers")
+                        return
+                    sys_dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == sys_group_id), None)
+                    data_dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == data_group_id), None)
+                    sys_size = sys_dg.get("diskSize", {}) if sys_dg else {}
+                    data_size = data_dg.get("diskSize", {}) if data_dg else {}
+                    sys_txt = f"{sys_size.get('value','?')}{sys_size.get('unit','')}"
+                    data_txt = f"{data_size.get('value','?')}{data_size.get('unit','')}"
+                    action["raid0"] = False
+                    action["disk_group_id"] = sys_group_id
+                    action["raid_disks"] = None
+                    action["data_raid0"] = True
+                    action["data_disk_group_id"] = data_group_id
+                    action["data_raid_disks"] = data_disks
+                    raid_text = f"NVMe系统盘 group={sys_group_id} {sys_txt} + HDD RAID0 /data group={data_group_id} {data_disks}x{data_txt}"
+                elif mode.startswith("sys"):
                     try:
                         group_id = int(mode[3:])
                     except ValueError:
@@ -2480,6 +2534,9 @@ def run_bot(cfg: dict):
                     action["raid0"] = False
                     action["disk_group_id"] = group_id
                     action["raid_disks"] = None
+                    action["data_raid0"] = False
+                    action["data_disk_group_id"] = None
+                    action["data_raid_disks"] = None
                     raid_text = f"系统盘 group={group_id} {disks}x {disk_type} {size_txt} / 无 RAID0"
                 elif mode.startswith("g") and "d" in mode:
                     try:
@@ -2496,11 +2553,17 @@ def run_bot(cfg: dict):
                     action["raid0"] = True
                     action["disk_group_id"] = group_id
                     action["raid_disks"] = disks
+                    action["data_raid0"] = False
+                    action["data_disk_group_id"] = None
+                    action["data_raid_disks"] = None
                     raid_text = f"RAID0 group={group_id} {disks}x {disk_type} {size_txt}"
                 else:
                     action["raid0"] = False
                     action["disk_group_id"] = None
                     action["raid_disks"] = None
+                    action["data_raid0"] = False
+                    action["data_disk_group_id"] = None
+                    action["data_raid_disks"] = None
                     raid_text = "默认分区 / 无 RAID"
 
                 confirm_id = str(int(time.time() * 1000))[-10:]
@@ -2513,6 +2576,9 @@ def run_bot(cfg: dict):
                     "raid0": action.get("raid0", False),
                     "raid_disks": action.get("raid_disks"),
                     "disk_group_id": action.get("disk_group_id"),
+                    "data_raid0": action.get("data_raid0", False),
+                    "data_disk_group_id": action.get("data_disk_group_id"),
+                    "data_raid_disks": action.get("data_raid_disks"),
                 }
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("⚠️ 确认安装", callback_data=f"act|{confirm_id}")],
@@ -3071,17 +3137,24 @@ def run_bot(cfg: dict):
                 raid0 = action.get("raid0", False)
                 raid_disks = action.get("raid_disks")
                 disk_group_id = action.get("disk_group_id")
+                data_raid0 = action.get("data_raid0", False)
+                data_disk_group_id = action.get("data_disk_group_id")
+                data_raid_disks = action.get("data_raid_disks")
                 await query.edit_message_text(f"⏳ 正在安装 `{template}` 到 `{service_name}`...")
                 try:
                     result = ovh_client.reinstall_server(
                         service_name, template, hostname,
                         ssh_key_name=ssh_key_name, raid0=raid0,
-                        raid_disks=raid_disks, disk_group_id=disk_group_id
+                        raid_disks=raid_disks, disk_group_id=disk_group_id,
+                        data_raid0=data_raid0, data_disk_group_id=data_disk_group_id,
+                        data_raid_disks=data_raid_disks
                     )
                     task_id = result.get("taskId", "?") if isinstance(result, dict) else "?"
                     pending_actions.pop(action_id, None)
                     raid_text = None
-                    if raid0:
+                    if data_raid0:
+                        raid_text = f"系统盘 group={disk_group_id} + /data RAID0 group={data_disk_group_id}" + (f" disks={data_raid_disks}" if data_raid_disks else "")
+                    elif raid0:
                         raid_text = f"RAID0 group={disk_group_id}" + (f" disks={raid_disks}" if raid_disks else "")
                     elif disk_group_id is not None:
                         raid_text = f"系统盘 group={disk_group_id} / 无 RAID0"
