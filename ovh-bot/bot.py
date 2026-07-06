@@ -1729,23 +1729,47 @@ def run_bot(cfg: dict):
         return "█" * filled + "░" * (width - filled)
 
     def _extract_install_progress(status_obj, elapsed_sec: int = 0):
-        """从 OVH 安装状态中提取阶段和百分比；缺少百分比时按耗时给保守估算。"""
+        """从 OVH 安装状态中提取阶段和百分比。"""
         if isinstance(status_obj, dict):
+            progress = status_obj.get("progress")
+            if isinstance(progress, list) and progress:
+                total = len(progress)
+                done_count = 0
+                current = None
+                has_error = False
+                for step in progress:
+                    st = str(step.get("status", "")).lower() if isinstance(step, dict) else ""
+                    comment = str(step.get("comment", "")) if isinstance(step, dict) else str(step)
+                    err = str(step.get("error", "")) if isinstance(step, dict) else ""
+                    if err:
+                        has_error = True
+                        current = f"失败: {err}"
+                        break
+                    if st in ("done", "finished", "success", "ok"):
+                        done_count += 1
+                    elif st in ("doing", "running", "inprogress", "in_progress") and current is None:
+                        current = comment or st
+                if has_error:
+                    return current, 100, True
+                percent = min(99, max(1, int(done_count * 100 / total)))
+                if done_count >= total:
+                    return "安装步骤已完成", 100, True
+                return current or "等待下一步", percent, False
+
             status_text = str(status_obj.get("status") or status_obj.get("state") or status_obj.get("step") or status_obj)
-            for key in ("progress", "percentage", "percent"):
+            for key in ("percentage", "percent"):
                 val = status_obj.get(key)
                 if isinstance(val, (int, float)):
-                    return status_text, int(val), False
+                    return status_text, int(val), int(val) >= 100
         else:
             status_text = str(status_obj)
 
         lower = status_text.lower()
         if "not being installed" in lower or "not being reinstalled" in lower:
             return "安装已结束或 OVH 暂无安装状态", 100, True
-        if "error" in lower or "fail" in lower:
+        if "fail" in lower:
             return status_text, 100, True
-        # OVH 有些账号只返回文本状态，没有百分比；用耗时做保守估算，最多 95%，完成由状态接口判断。
-        estimated = min(95, max(5, int(elapsed_sec / 18)))  # 约 30 分钟到 95%
+        estimated = min(95, max(5, int(elapsed_sec / 18)))
         return status_text, estimated, False
 
     async def track_install_progress(message, service_name: str, template: str, task_id: str = "?",
