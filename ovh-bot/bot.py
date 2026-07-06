@@ -2449,12 +2449,13 @@ def run_bot(cfg: dict):
                     size_txt = f"{size.get('value','?')}{size.get('unit','')}"
                     disk_type = dg.get("diskType", "DISK")
                     is_nvme = "nvme" in str(disk_type).lower()
-                    sys_label = f"✅ 系统盘 group={group_id} {disks}x {disk_type} {size_txt}"
                     if is_nvme:
-                        sys_label = f"✅ 推荐NVMe系统盘 group={group_id} {disks}x {size_txt}"
+                        sys_label = f"✅ NVMe系统盘 (group={group_id})"
+                    else:
+                        sys_label = f"✅ HDD系统盘 不组RAID (group={group_id})"
                     keyboard.append([InlineKeyboardButton(sys_label, callback_data=f"srv|raid|{action_id}|sys{group_id}")])
                     if disks >= 2 and not is_nvme:
-                        label = f"⚠️ HDD RAID0系统盘 group={group_id} {disks}x {disk_type} {size_txt}"
+                        label = f"⚠️ HDD系统盘 RAID0 (group={group_id})"
                         keyboard.append([InlineKeyboardButton(label, callback_data=f"srv|raid|{action_id}|g{group_id}d{disks}")])
 
                 # OVH reinstall API 不支持一次安装同时自定义多个磁盘组。
@@ -2466,11 +2467,7 @@ def run_bot(cfg: dict):
                     InlineKeyboardButton("取消", callback_data="cancel")
                 ])
                 await query.edit_message_text(
-                    f"🧩 选择系统安装磁盘\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}\n\n"
-                    f"说明:\n"
-                    f"✅ 系统盘 = 系统安装到该磁盘组，不组 RAID\n"
-                    f"⚠️ HDD RAID0系统盘 = 系统直接安装到 HDD RAID0 上\n"
-                    f"OVH 不支持安装时同时配置 NVMe 系统盘 + HDD 数据盘；混合盘如需 NVMe 做系统盘，请选 NVMe 系统盘。",
+                    f"🧩 选择系统安装磁盘\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
