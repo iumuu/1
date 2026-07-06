@@ -938,15 +938,8 @@ class OVHClient:
             # 指定系统安装到某个磁盘组，但不做 RAID0；用于混合盘机器选择 NVMe 系统盘
             storage_config.append({"diskGroupId": disk_group_id})
 
-        if data_raid0 and data_disk_group_id is not None:
-            data_partitioning = {
-                "layout": [
-                    {"mountPoint": "/data", "fileSystem": "ext4", "raidLevel": 0, "size": 0}
-                ],
-            }
-            if data_raid_disks is not None:
-                data_partitioning["disks"] = data_raid_disks
-            storage_config.append({"diskGroupId": data_disk_group_id, "partitioning": data_partitioning})
+        # 注意：OVH 当前不支持一次 reinstall 自定义多个 disk groups。
+        # 如需 NVMe 系统盘 + HDD RAID0 数据盘，请先安装到 NVMe，再进系统手动组 /data。
 
         if storage_config:
             body["storage"] = storage_config
@@ -2465,21 +2458,8 @@ def run_bot(cfg: dict):
                         label = f"{warn} group={group_id} {disks}x {disk_type} {size_txt}"
                         keyboard.append([InlineKeyboardButton(label, callback_data=f"srv|raid|{action_id}|g{group_id}d{disks}")])
 
-                # 混合盘推荐：NVMe 做系统盘，HDD 多盘组做 /data RAID0
-                nvme_groups = [x for x in action.get("disk_groups", []) if "nvme" in str(x.get("diskType", "")).lower()]
-                hdd_groups = [x for x in action.get("disk_groups", []) if "nvme" not in str(x.get("diskType", "")).lower() and (x.get("numberOfDisks") or 0) >= 2]
-                if nvme_groups and hdd_groups:
-                    sys_g = nvme_groups[0]
-                    data_g = hdd_groups[0]
-                    sys_id = sys_g.get("diskGroupId")
-                    data_id = data_g.get("diskGroupId")
-                    data_disks = data_g.get("numberOfDisks") or 0
-                    data_size = data_g.get("diskSize", {})
-                    data_size_txt = f"{data_size.get('value','?')}{data_size.get('unit','')}"
-                    keyboard.insert(0, [InlineKeyboardButton(
-                        f"⭐ NVMe系统盘 + HDD RAID0数据盘 /data ({data_disks}x{data_size_txt})",
-                        callback_data=f"srv|raid|{action_id}|combo{sys_id}_{data_id}_{data_disks}"
-                    )])
+                # OVH reinstall API 不支持一次安装同时自定义多个磁盘组。
+                # 混合盘机器只能先选择 NVMe 系统盘，HDD 数据盘 RAID0 需系统安装完成后进 SSH 手动创建。
                 if not keyboard:
                     keyboard = [[InlineKeyboardButton("默认分区 / 无 RAID", callback_data=f"srv|raid|{action_id}|none")]]
                 keyboard.append([
@@ -2489,38 +2469,15 @@ def run_bot(cfg: dict):
                 await query.edit_message_text(
                     f"🧩 选择系统安装磁盘\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}\n\n"
                     f"说明:\n"
-                    f"⭐ 推荐组合 = NVMe 挂 /，HDD 组 RAID0 挂 /data\n"
                     f"✅ 系统盘 = 系统安装到该磁盘组，不做 RAID0\n"
                     f"⚠️ RAID0系统盘 = 系统直接安装到该磁盘组的 RAID0 上，不是额外数据盘\n"
-                    f"混合盘机器建议选 ⭐ 推荐组合。",
+                    f"OVH 不支持安装时同时配置 NVMe 系统盘 + HDD 数据盘；混合盘请先选 NVMe 系统盘，安装完成后 SSH 手动组 HDD RAID0 挂 /data。",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
             elif op == "raid" and len(parts) >= 4:
                 mode = parts[3]
-                if mode.startswith("combo"):
-                    try:
-                        sys_part, data_part, disks_part = mode[5:].split("_", 2)
-                        sys_group_id = int(sys_part)
-                        data_group_id = int(data_part)
-                        data_disks = int(disks_part)
-                    except ValueError:
-                        await query.edit_message_text("❌ 磁盘方案参数无效，请重新 /servers")
-                        return
-                    sys_dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == sys_group_id), None)
-                    data_dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == data_group_id), None)
-                    sys_size = sys_dg.get("diskSize", {}) if sys_dg else {}
-                    data_size = data_dg.get("diskSize", {}) if data_dg else {}
-                    sys_txt = f"{sys_size.get('value','?')}{sys_size.get('unit','')}"
-                    data_txt = f"{data_size.get('value','?')}{data_size.get('unit','')}"
-                    action["raid0"] = False
-                    action["disk_group_id"] = sys_group_id
-                    action["raid_disks"] = None
-                    action["data_raid0"] = True
-                    action["data_disk_group_id"] = data_group_id
-                    action["data_raid_disks"] = data_disks
-                    raid_text = f"NVMe系统盘 group={sys_group_id} {sys_txt} + HDD RAID0 /data group={data_group_id} {data_disks}x{data_txt}"
-                elif mode.startswith("sys"):
+                if mode.startswith("sys"):
                     try:
                         group_id = int(mode[3:])
                     except ValueError:
