@@ -2887,7 +2887,7 @@ def run_bot(cfg: dict):
 
         elif parts[0] == "act" and len(parts) >= 2:
             action_id = parts[1]
-            action = pending_actions.pop(action_id, None)
+            action = pending_actions.get(action_id)
             if not action:
                 await query.edit_message_text("❌ 操作已过期，请重新发起")
                 return
@@ -2905,6 +2905,7 @@ def run_bot(cfg: dict):
                     target_memory=action.get("memory"),
                 )
                 if not available:
+                    pending_actions.pop(action_id, None)
                     dc_display = format_dc(dc) if dc else "全部机房"
                     cfg_mem = format_memory(action.get("memory", ""))
                     cfg_stor = format_storage(action.get("storage", ""))
@@ -2928,35 +2929,45 @@ def run_bot(cfg: dict):
                     target_memory=action.get("memory"),
                 )
                 text = _format_buy_result(result)
+                if result.get("success"):
+                    pending_actions.pop(action_id, None)
                 if action.get("count", 1) > 1 and result.get("success"):
                     text += f"\n\n📊 已按按钮下单数: {action['count']}"
                 await query.edit_message_text(text, parse_mode="Markdown")
 
             elif action["type"] == "watch_start":
-                plan_code = action["plan_code"]
-                watch_tasks[plan_code] = {
-                    "dc": action.get("dc"),
-                    "storage": action.get("storage"),
-                    "memory": action.get("memory"),
-                    "max_orders": action.get("max_orders", 1),
-                    "ordered": 0,
-                    "active": True,
-                    "chat_id": str(query.message.chat_id),
-                    "_last_order_time": {},
-                }
-                save_watch_tasks()
-                if not watch_running:
-                    watch_running = True
-                    asyncio.ensure_future(watch_monitor_loop())
-                await query.edit_message_text(
-                    f"📡 *开始监控* `{plan_code}`\n\n"
-                    f"📍 机房: {format_dc(action.get('dc')) if action.get('dc') else '全部机房'}\n"
-                    f"📦 配置: {format_memory(action.get('memory'))} + {format_storage(action.get('storage'))}\n"
-                    f"🎯 下单上限: {action.get('max_orders', 1)}\n"
-                    f"📊 已下: 0 单\n\n"
-                    f"💡 达到上限后自动停止",
-                    parse_mode="Markdown"
-                )
+                try:
+                    plan_code = action["plan_code"]
+                    watch_tasks[plan_code] = {
+                        "dc": action.get("dc"),
+                        "storage": action.get("storage"),
+                        "memory": action.get("memory"),
+                        "max_orders": action.get("max_orders", 1),
+                        "ordered": 0,
+                        "active": True,
+                        "chat_id": str(query.message.chat_id),
+                        "_last_order_time": {},
+                    }
+                    save_watch_tasks()
+                    if not watch_running:
+                        watch_running = True
+                        asyncio.ensure_future(watch_monitor_loop())
+                    pending_actions.pop(action_id, None)
+                    await query.edit_message_text(
+                        f"📡 *开始监控* `{plan_code}`\n\n"
+                        f"📍 机房: {format_dc(action.get('dc')) if action.get('dc') else '全部机房'}\n"
+                        f"📦 配置: {format_memory(action.get('memory'))} + {format_storage(action.get('storage'))}\n"
+                        f"🎯 下单上限: {action.get('max_orders', 1)}\n"
+                        f"📊 已下: 0 单\n\n"
+                        f"💡 达到上限后自动停止",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.error(f"启动监控失败: {e}\n{traceback.format_exc()}")
+                    await query.edit_message_text(
+                        f"❌ 启动监控失败，操作未过期，可重试确认按钮或重新 /watch\n\n`{e}`",
+                        parse_mode="Markdown"
+                    )
 
             elif action["type"] == "reinstall":
                 service_name = action["service_name"]
@@ -2974,6 +2985,7 @@ def run_bot(cfg: dict):
                         raid_disks=raid_disks, disk_group_id=disk_group_id
                     )
                     task_id = result.get("taskId", "?") if isinstance(result, dict) else "?"
+                    pending_actions.pop(action_id, None)
                     await query.edit_message_text(
                         f"✅ *安装任务已提交*\n\n"
                         f"🖥️ 服务器: `{service_name}`\n"
@@ -2993,6 +3005,7 @@ def run_bot(cfg: dict):
                 await query.edit_message_text(f"⏳ 正在重启 `{service_name}`...")
                 try:
                     ovh_client.reboot_server(service_name)
+                    pending_actions.pop(action_id, None)
                     await query.edit_message_text(
                         f"✅ 重启指令已发送\n\n🖥️ `{service_name}`\n⏳ 服务器正在重启...",
                         parse_mode="Markdown"
