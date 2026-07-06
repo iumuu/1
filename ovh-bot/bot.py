@@ -1712,6 +1712,69 @@ def run_bot(cfg: dict):
         except Exception as e:
             logger.error(f"发送监控消息失败: {e}")
 
+    def _progress_bar(percent: int, width: int = 12) -> str:
+        percent = max(0, min(100, int(percent)))
+        filled = round(width * percent / 100)
+        return "█" * filled + "░" * (width - filled)
+
+    def _extract_install_progress(status_obj, elapsed_sec: int = 0):
+        """从 OVH 安装状态中提取阶段和百分比；缺少百分比时按耗时给保守估算。"""
+        if isinstance(status_obj, dict):
+            status_text = str(status_obj.get("status") or status_obj.get("state") or status_obj.get("step") or status_obj)
+            for key in ("progress", "percentage", "percent"):
+                val = status_obj.get(key)
+                if isinstance(val, (int, float)):
+                    return status_text, int(val), False
+        else:
+            status_text = str(status_obj)
+
+        lower = status_text.lower()
+        if "not being installed" in lower or "not being reinstalled" in lower:
+            return "安装已结束或 OVH 暂无安装状态", 100, True
+        if "error" in lower or "fail" in lower:
+            return status_text, 100, True
+        # OVH 有些账号只返回文本状态，没有百分比；用耗时做保守估算，最多 95%，完成由状态接口判断。
+        estimated = min(95, max(5, int(elapsed_sec / 18)))  # 约 30 分钟到 95%
+        return status_text, estimated, False
+
+    async def track_install_progress(message, service_name: str, template: str, task_id: str = "?",
+                                     ssh_key_name: str = None, raid_text: str = None):
+        """后台轮询安装状态并编辑同一条消息显示进度条。"""
+        start_ts = time.time()
+        last_text = None
+        for _ in range(120):  # 最多跟踪约 40 分钟
+            try:
+                elapsed = int(time.time() - start_ts)
+                status_obj = ovh_client.get_install_status(service_name)
+                status_text, percent, done = _extract_install_progress(status_obj, elapsed)
+                bar = _progress_bar(percent)
+                mins, secs = divmod(elapsed, 60)
+                text = (
+                    f"💿 *系统安装进度*\n\n"
+                    f"🖥️ 服务器: `{service_name}`\n"
+                    f"💿 系统: `{template}`\n"
+                    + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
+                    + (f"🧩 磁盘: `{raid_text}`\n" if raid_text else "")
+                    + f"📋 任务ID: `{task_id}`\n\n"
+                    f"`{bar}` {percent}%\n"
+                    f"📌 状态: `{status_text}`\n"
+                    f"⏱️ 耗时: {mins}分{secs}秒"
+                )
+                if done:
+                    text += "\n\n✅ 安装状态已结束，请用 /servers 确认当前系统。"
+                else:
+                    text += "\n\n⏳ Bot 会自动刷新此进度。"
+
+                if text != last_text:
+                    await message.edit_text(text, parse_mode="Markdown")
+                    last_text = text
+                if done:
+                    return
+                await asyncio.sleep(20)
+            except Exception as e:
+                logger.error(f"刷新安装进度失败: {e}")
+                await asyncio.sleep(20)
+
     async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """开始监控服务器 - 通过按钮选择配置和机房"""
         if not check_user(update.effective_user.id):
@@ -2986,16 +3049,26 @@ def run_bot(cfg: dict):
                     )
                     task_id = result.get("taskId", "?") if isinstance(result, dict) else "?"
                     pending_actions.pop(action_id, None)
+                    raid_text = None
+                    if raid0:
+                        raid_text = f"RAID0 group={disk_group_id}" + (f" disks={raid_disks}" if raid_disks else "")
+                    else:
+                        raid_text = "默认分区 / 无 RAID"
                     await query.edit_message_text(
-                        f"✅ *安装任务已提交*\n\n"
+                        f"💿 *系统安装进度*\n\n"
                         f"🖥️ 服务器: `{service_name}`\n"
                         f"💿 系统: `{template}`\n"
                         + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
-                        + (f"🧩 RAID: `RAID0 group={disk_group_id}" + (f" disks={raid_disks}" if raid_disks else "") + "`\n" if raid0 else "")
+                        + f"🧩 磁盘: `{raid_text}`\n"
                         + f"📋 任务ID: `{task_id}`\n\n"
-                        f"⏳ 安装进行中... 通常需要 5-30 分钟\n"
-                        f"💡 可用 `/servers` 查看当前系统变化",
+                        f"`█░░░░░░░░░░░` 5%\n"
+                        f"📌 状态: `安装任务已提交`\n"
+                        f"⏱️ 耗时: 0分0秒\n\n"
+                        f"⏳ Bot 会自动刷新此进度。",
                         parse_mode="Markdown"
+                    )
+                    asyncio.ensure_future(
+                        track_install_progress(query.message, service_name, template, str(task_id), ssh_key_name, raid_text)
                     )
                 except Exception as e:
                     await query.edit_message_text(f"❌ 安装失败: {e}")
