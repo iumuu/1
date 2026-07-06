@@ -1758,10 +1758,23 @@ def run_bot(cfg: dict):
                         current = comment or st
                 if has_error:
                     return current, 100, True
-                percent = min(99, max(1, int(done_count * 100 / total)))
                 if done_count >= total:
                     return "安装步骤已完成", 100, True
-                return current or "等待下一步", percent, False
+                stage_text = current or "等待下一步"
+                lower_stage = stage_text.lower()
+                if "initial" in lower_stage:
+                    percent = 5
+                elif "hardware reboot" in lower_stage or "reboot" in lower_stage:
+                    percent = 9
+                elif "partition" in lower_stage or "format" in lower_stage:
+                    percent = 25
+                elif "install" in lower_stage or "copy" in lower_stage:
+                    percent = 45
+                elif "config" in lower_stage or "post" in lower_stage:
+                    percent = 75
+                else:
+                    percent = min(95, max(5, int(elapsed_sec / 18)))
+                return stage_text, percent, False
 
             status_text = str(status_obj.get("status") or status_obj.get("state") or status_obj.get("step") or status_obj)
             for key in ("percentage", "percent"):
@@ -1784,6 +1797,7 @@ def run_bot(cfg: dict):
         """后台轮询安装状态并编辑同一条消息显示进度条。"""
         start_ts = time.time()
         last_text = None
+        last_percent = 0
         for _ in range(120):  # 最多跟踪约 40 分钟
             try:
                 elapsed = int(time.time() - start_ts)
@@ -1796,6 +1810,8 @@ def run_bot(cfg: dict):
                     status_text = f"安装完成，当前系统: {current_os}"
                     percent = 100
                     done = True
+                percent = max(last_percent, percent)
+                last_percent = percent
                 bar = _progress_bar(percent)
                 mins, secs = divmod(elapsed, 60)
                 text = (
