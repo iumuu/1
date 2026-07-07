@@ -905,6 +905,13 @@ class OVHClient:
         except Exception as e:
             return str(e)
 
+    def get_server_task(self, service_name: str, task_id: str) -> dict:
+        """获取服务器任务状态"""
+        try:
+            return self.get(f"/dedicated/server/{service_name}/task/{task_id}")
+        except Exception:
+            return {}
+
     def list_ssh_keys(self) -> list:
         """列出 OVH 账号中预设的 SSH key"""
         try:
@@ -1646,12 +1653,19 @@ def run_bot(cfg: dict):
                         )
                         if available:
                             chosen = available[0]
-                            # 检查 2 分钟内是否刚下过同款
+                            # 成功下单后短冷却，失败后长冷却，避免刷屏但多单能更快继续
                             cooldown_key = f"{plan_code}|{chosen['datacenter']}|{chosen['fqn']}"
                             now = time.time()
                             last_order_time = task.get("_last_order_time", {})
                             if cooldown_key in last_order_time:
-                                if now - last_order_time[cooldown_key] < 120:
+                                cd = last_order_time[cooldown_key]
+                                if isinstance(cd, dict):
+                                    last_ts = cd.get("ts", 0)
+                                    cooldown_sec = cd.get("cooldown", 120)
+                                else:
+                                    last_ts = cd
+                                    cooldown_sec = 120
+                                if now - last_ts < cooldown_sec:
                                     continue
 
                             stor_str = f" {task['storage']}" if task.get("storage") else ""
@@ -1674,7 +1688,7 @@ def run_bot(cfg: dict):
 
                             if result["success"]:
                                 task["ordered"] += 1
-                                last_order_time[cooldown_key] = now
+                                last_order_time[cooldown_key] = {"ts": now, "cooldown": 15}
                                 task["_last_order_time"] = last_order_time
                                 save_watch_tasks()
 
@@ -1700,8 +1714,8 @@ def run_bot(cfg: dict):
                                 else:
                                     text += "\n\n⚠️ 请尽快手动付款以锁定订单！"
                             else:
-                                # 失败也加短冷却，避免库存瞬时变化时疯狂刷屏/重复请求
-                                last_order_time[cooldown_key] = now
+                                # 失败加长冷却，避免库存瞬时变化时疯狂刷屏/重复请求
+                                last_order_time[cooldown_key] = {"ts": now, "cooldown": 120}
                                 task["_last_order_time"] = last_order_time
                                 save_watch_tasks()
                                 text = f"❌ 监控自动下单失败: `{plan_code}`\n{result['error']}"
@@ -1806,7 +1820,13 @@ def run_bot(cfg: dict):
                 server_info = ovh_client.get_server_info(service_name)
                 current_os = str(server_info.get("os", "")) if isinstance(server_info, dict) else ""
                 template_base = template.split("_")[0]
-                if current_os and (current_os == template or template in current_os or template_base in current_os):
+                task_info = ovh_client.get_server_task(service_name, task_id) if task_id and task_id != "?" else {}
+                task_status = str(task_info.get("status", "") or task_info.get("state", "")).lower() if isinstance(task_info, dict) else ""
+                if task_status in ("done", "finished", "completed", "success"):
+                    status_text = f"安装任务完成，当前系统: {current_os or '待刷新'}"
+                    percent = 100
+                    done = True
+                elif current_os and (current_os == template or template in current_os or template_base in current_os):
                     status_text = f"安装完成，当前系统: {current_os}"
                     percent = 100
                     done = True
