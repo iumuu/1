@@ -1793,7 +1793,7 @@ def run_bot(cfg: dict):
         return status_text, estimated, False
 
     async def track_install_progress(message, service_name: str, template: str, task_id: str = "?",
-                                     ssh_key_name: str = None, raid_text: str = None):
+                                     ssh_key_name: str = None, raid_text: str = None, order_id: str = None):
         """后台轮询安装状态并编辑同一条消息显示进度条。"""
         start_ts = time.time()
         last_text = None
@@ -1820,7 +1820,9 @@ def run_bot(cfg: dict):
                     f"💿 系统: `{template}`\n"
                     + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
                     + (f"🧩 磁盘: `{raid_text}`\n" if raid_text else "")
-                    + f"📋 任务ID: `{task_id}`\n\n"
+                    + f"📋 任务ID: `{task_id}`\n"
+                    + (f"🧾 订单号: `{order_id}`\n" if order_id else "")
+                    + "\n"
                     f"`{bar}` {percent}%\n"
                     f"📌 状态: `{status_text}`\n"
                     f"⏱️ 耗时: {mins}分{secs}秒"
@@ -2531,12 +2533,13 @@ def run_bot(cfg: dict):
                     disk_type = dg.get("diskType", "DISK")
                     is_nvme = "nvme" in str(disk_type).lower()
                     if is_nvme:
-                        sys_label = f"✅ NVMe系统盘 (group={group_id})"
+                        sys_label = f"✅ NVMe系统盘 不组RAID (group={group_id})"
                     else:
                         sys_label = f"✅ HDD系统盘 不组RAID (group={group_id})"
-                    keyboard.append([InlineKeyboardButton(sys_label, callback_data=f"srv|raid|{action_id}|sys{group_id}")])
-                    if disks >= 2 and not is_nvme:
-                        label = f"⚠️ HDD系统盘 RAID0 (group={group_id})"
+                    keyboard.append([InlineKeyboardButton(sys_label, callback_data=f"srv|raid|{action_id}|sysauto{group_id}")])
+                    if disks >= 2:
+                        raid_name = "NVMe系统盘 RAID0" if is_nvme else "HDD系统盘 RAID0"
+                        label = f"⚠️ {raid_name} (group={group_id})"
                         keyboard.append([InlineKeyboardButton(label, callback_data=f"srv|raid|{action_id}|g{group_id}d{disks}")])
 
                 # OVH reinstall API 不支持一次安装同时自定义多个磁盘组。
@@ -2554,7 +2557,25 @@ def run_bot(cfg: dict):
 
             elif op == "raid" and len(parts) >= 4:
                 mode = parts[3]
-                if mode.startswith("sys"):
+                if mode.startswith("sysauto"):
+                    try:
+                        group_id = int(mode[7:])
+                    except ValueError:
+                        await query.edit_message_text("❌ 磁盘方案参数无效，请重新 /servers")
+                        return
+                    dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == group_id), None)
+                    disk_type = dg.get("diskType", "DISK") if dg else "DISK"
+                    disks = dg.get("numberOfDisks") if dg else "?"
+                    size = dg.get("diskSize", {}) if dg else {}
+                    size_txt = f"{size.get('value','?')}{size.get('unit','')}"
+                    action["raid0"] = False
+                    action["disk_group_id"] = None
+                    action["raid_disks"] = None
+                    action["data_raid0"] = False
+                    action["data_disk_group_id"] = None
+                    action["data_raid_disks"] = None
+                    raid_text = f"不组 RAID / OVH默认安装 (参考 group={group_id} {disks}x {disk_type} {size_txt})"
+                elif mode.startswith("sys"):
                     try:
                         group_id = int(mode[3:])
                     except ValueError:
@@ -3184,6 +3205,7 @@ def run_bot(cfg: dict):
                         data_raid_disks=data_raid_disks
                     )
                     task_id = result.get("taskId", "?") if isinstance(result, dict) else "?"
+                    order_id = (result.get("orderId") or result.get("order_id")) if isinstance(result, dict) else None
                     pending_actions.pop(action_id, None)
                     raid_text = None
                     if data_raid0:
@@ -3200,15 +3222,17 @@ def run_bot(cfg: dict):
                         f"💿 系统: `{template}`\n"
                         + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
                         + f"🧩 磁盘: `{raid_text}`\n"
-                        + f"📋 任务ID: `{task_id}`\n\n"
-                        f"`█░░░░░░░░░░░` 5%\n"
+                        + f"📋 任务ID: `{task_id}`\n"
+                        + (f"🧾 订单号: `{order_id}`\n" if order_id else "")
+                        + "\n"
+                        + f"`█░░░░░░░░░░░` 5%\n"
                         f"📌 状态: `安装任务已提交`\n"
                         f"⏱️ 耗时: 0分0秒\n\n"
                         f"⏳ Bot 会自动刷新此进度。",
                         parse_mode="Markdown"
                     )
                     asyncio.ensure_future(
-                        track_install_progress(query.message, service_name, template, str(task_id), ssh_key_name, raid_text)
+                        track_install_progress(query.message, service_name, template, str(task_id), ssh_key_name, raid_text, str(order_id) if order_id else None)
                     )
                 except Exception as e:
                     await query.edit_message_text(f"❌ 安装失败: {e}")
