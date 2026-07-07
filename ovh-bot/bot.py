@@ -1826,7 +1826,24 @@ def run_bot(cfg: dict):
                     f"⏱️ 耗时: {mins}分{secs}秒"
                 )
                 if done:
-                    text += "\n\n✅ 安装状态已结束，请用 /servers 确认当前系统。"
+                    if isinstance(server_info, dict) and server_info:
+                        info_lines = []
+                        if server_info.get("ip"):
+                            info_lines.append(f"🌐 IP: `{server_info.get('ip')}`")
+                        if server_info.get("datacenter"):
+                            info_lines.append(f"📍 机房: `{server_info.get('datacenter')}`")
+                        if server_info.get("os"):
+                            info_lines.append(f"💻 当前系统: `{server_info.get('os')}`")
+                        if server_info.get("state"):
+                            info_lines.append(f"📌 状态: `{server_info.get('state')}`")
+                        if server_info.get("commercialRange"):
+                            info_lines.append(f"📦 型号: `{server_info.get('commercialRange')}`")
+                        if info_lines:
+                            text += "\n\n✅ 安装完成\n" + "\n".join(info_lines)
+                        else:
+                            text += "\n\n✅ 安装完成"
+                    else:
+                        text += "\n\n✅ 安装完成"
                 else:
                     text += "\n\n⏳ Bot 会自动刷新此进度。"
 
