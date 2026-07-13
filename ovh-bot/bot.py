@@ -1320,10 +1320,10 @@ def format_dc(dc: str) -> str:
 def parse_plan_code(text: str):
     """从文本中提取 planCode（兼容旧调用，内部使用 resolve_plan_code）"""
     text_lower = text.lower()
-    # 1. 先查友好名称
-    for name, pc in SERVER_NAME_MAP.items():
+    # 1. 先查友好名称（按长度降序，避免 ks1 误匹配 ks1b）
+    for name in sorted(SERVER_NAME_MAP.keys(), key=len, reverse=True):
         if name in text_lower:
-            return pc
+            return SERVER_NAME_MAP[name]
     # 2. 正则匹配
     for pattern in PLAN_CODE_PATTERNS:
         m = re.search(pattern, text_lower)
