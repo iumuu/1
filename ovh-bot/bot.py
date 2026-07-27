@@ -1625,6 +1625,7 @@ def run_bot(cfg: dict):
 
     watch_tasks = {}
     load_watch_tasks()  # 启动时恢复
+    watch_running = False
     pending_actions = {}
     watch_sessions = {}
     buy_sessions = {}
@@ -1651,6 +1652,9 @@ def run_bot(cfg: dict):
                             target_storage=task.get("storage"),
                             target_memory=task.get("memory"),
                         )
+                        excluded = set(task.get("excluded_dcs", []))
+                        if excluded:
+                            available = [x for x in available if x.get("datacenter") not in excluded]
                         if available:
                             chosen = available[0]
                             # 成功下单后短冷却，失败后长冷却，避免刷屏但多单能更快继续
@@ -1919,6 +1923,7 @@ def run_bot(cfg: dict):
             "display_configs": source_cfgs,
             "selected_fqn": None,
             "selected_dc": None,
+            "excluded_dcs": [],
             "max_orders": 1,
         }
 
@@ -1980,6 +1985,8 @@ def run_bot(cfg: dict):
             if task.get("dc"):
                 dc_display = format_dc(task['dc']) if task['dc'] else "全部机房"
                 filter_parts.append(f"机房={dc_display}")
+            if task.get("excluded_dcs"):
+                filter_parts.append("排除=" + ", ".join(format_dc(dc) for dc in task.get('excluded_dcs', [])))
             if task.get("storage"):
                 filter_parts.append(f"存储={format_storage(task['storage'])}")
             if task.get("memory"):
@@ -2709,18 +2716,21 @@ def run_bot(cfg: dict):
                 if not cfg:
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
+                excluded = set(session.get("excluded_dcs", []))
                 dcs = list(cfg["datacenters"].items())
                 keyboard = []
                 keyboard.append([InlineKeyboardButton("🌐 全部机房", callback_data=f"watch|dc|{session_id}|all")])
                 for dc, status in dcs:
                     status_cn = format_dc_status(status)
-                    keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"watch|dc|{session_id}|{dc}")])
+                    mark = "❌" if dc in excluded else "✅"
+                    keyboard.append([InlineKeyboardButton(f"{mark} {format_dc(dc)} ({status_cn})", callback_data=f"watch|dc|{session_id}|{dc}")])
                 keyboard.append([
                     InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|cfgback|{session_id}"),
-                    InlineKeyboardButton("取消", callback_data="cancel")
+                    InlineKeyboardButton("下一步", callback_data=f"watch|exnext|{session_id}"),
                 ])
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
-                    f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    f"🚫 排除机房（可多选）\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n点机房可切换排除/恢复，点下一步继续。",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -2780,24 +2790,42 @@ def run_bot(cfg: dict):
                     return
                 if dc == "all":
                     session["selected_dc"] = None
+                    dc_display = "全部机房"
+                    keyboard = [
+                        [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
+                        [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
+                        [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
+                        [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                    ]
+                    await query.edit_message_text(
+                        f"🎯 选择下单数量\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n机房: {dc_display}",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
                 else:
-                    session["selected_dc"] = dc
-                dc_display = "全部机房" if dc == "all" else format_dc(dc)
-
-                keyboard = [
-                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
-                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
-                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
-                ]
-                await query.edit_message_text(
-                    f"🎯 选择下单数量\n\n"
-                    f"型号: `{plan_code}`\n"
-                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc_display}",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                    excluded = set(session.get("excluded_dcs", []))
+                    if dc in excluded:
+                        excluded.remove(dc)
+                    else:
+                        excluded.add(dc)
+                    session["excluded_dcs"] = sorted(excluded)
+                    dcs = list(cfg["datacenters"].items())
+                    keyboard = []
+                    keyboard.append([InlineKeyboardButton("🌐 全部机房", callback_data=f"watch|dc|{session_id}|all")])
+                    for dc2, status in dcs:
+                        status_cn = format_dc_status(status)
+                        mark = "❌" if dc2 in excluded else "✅"
+                        keyboard.append([InlineKeyboardButton(f"{mark} {format_dc(dc2)} ({status_cn})", callback_data=f"watch|dc|{session_id}|{dc2}")])
+                    keyboard.append([
+                        InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|cfgback|{session_id}"),
+                        InlineKeyboardButton("下一步", callback_data=f"watch|exnext|{session_id}"),
+                    ])
+                    keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                    await query.edit_message_text(
+                        f"🚫 排除机房（可多选）\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n已排除: {', '.join(format_dc(d) for d in excluded) if excluded else '无'}",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
 
             elif stage == "count" and len(parts) >= 4:
                 val = parts[3]
@@ -2814,6 +2842,7 @@ def run_bot(cfg: dict):
                     "plan_code": plan_code,
                     "fqn": cfg["fqn"],
                     "dc": dc,
+                    "excluded_dcs": session.get("excluded_dcs", []),
                     "storage": cfg.get("storage"),
                     "memory": cfg.get("memory"),
                     "max_orders": session.get("max_orders", 1),
@@ -3175,6 +3204,7 @@ def run_bot(cfg: dict):
                     plan_code = action["plan_code"]
                     watch_tasks[plan_code] = {
                         "dc": action.get("dc"),
+                        "excluded_dcs": action.get("excluded_dcs", []),
                         "storage": action.get("storage"),
                         "memory": action.get("memory"),
                         "max_orders": action.get("max_orders", 1),
