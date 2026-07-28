@@ -2735,6 +2735,30 @@ def run_bot(cfg: dict):
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
+            elif stage == "exnext":
+                cfg = session.get("selected_cfg")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    return
+                excluded = set(session.get("excluded_dcs", []))
+                dcs = list(cfg["datacenters"].items())
+                keyboard = []
+                keyboard.append([InlineKeyboardButton("🌐 全部机房", callback_data=f"watch|dc|{session_id}|all")])
+                for dc, status in dcs:
+                    if dc in excluded:
+                        continue
+                    status_cn = format_dc_status(status)
+                    keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"watch|scope|{session_id}|{dc}")])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel")
+                ])
+                await query.edit_message_text(
+                    f"📍 选择监控范围\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n已排除: {', '.join(format_dc(d) for d in excluded) if excluded else '无'}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
             elif stage == "countback":
                 cfg = session.get("selected_cfg")
                 dc = session.get("selected_dc")
@@ -2764,16 +2788,18 @@ def run_bot(cfg: dict):
                 session["selected_cfg"] = cfg
 
                 dcs = list(cfg["datacenters"].items())
+                session["excluded_dcs"] = []
                 keyboard = []
                 keyboard.append([InlineKeyboardButton("🌐 全部机房", callback_data=f"watch|dc|{session_id}|all")])
                 for dc, status in dcs:
                     status_cn = format_dc_status(status)
-                    keyboard.append([InlineKeyboardButton(f"{format_dc(dc)} ({status_cn})", callback_data=f"watch|dc|{session_id}|{dc}")])
+                    keyboard.append([InlineKeyboardButton(f"✅ {format_dc(dc)} ({status_cn})", callback_data=f"watch|dc|{session_id}|{dc}")])
                 keyboard.append([
                     InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|cfgback|{session_id}"),
-                    InlineKeyboardButton("取消", callback_data="cancel")
+                    InlineKeyboardButton("下一步", callback_data=f"watch|exnext|{session_id}"),
                 ])
-                title = f"📍 选择机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                title = f"🚫 排除机房（可多选）\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n点机房可切换排除/恢复，点下一步继续。"
                 if not dcs:
                     title = f"📍 这个配置没有可选机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
                 await query.edit_message_text(
@@ -2826,6 +2852,26 @@ def run_bot(cfg: dict):
                         parse_mode="Markdown",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
+
+            elif stage == "scope" and len(parts) >= 4:
+                dc = parts[3]
+                cfg = session.get("selected_cfg")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    return
+                session["selected_dc"] = dc
+                dc_display = format_dc(dc)
+                keyboard = [
+                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
+                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
+                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|exnext|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ]
+                await query.edit_message_text(
+                    f"🎯 选择下单数量\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n机房: {dc_display}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
 
             elif stage == "count" and len(parts) >= 4:
                 val = parts[3]
