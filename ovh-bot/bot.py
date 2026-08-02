@@ -1688,6 +1688,7 @@ def run_bot(cfg: dict):
     )
 
     tg_cfg = cfg.get("telegram", {})
+    reinstall_defaults = cfg.get("defaults", {})
     bot_token = tg_cfg.get("bot_token", "")
     allowed_users = tg_cfg.get("allowed_users", [])
     allow_all_users = tg_cfg.get("allow_all_users", False)
@@ -3066,8 +3067,8 @@ def run_bot(cfg: dict):
                     ),
                     parse_mode="Markdown",
                 )
-                default_template = cfg.get("defaults", {}).get("reinstall_os", "debian12_64")
-                configured_key = cfg.get("defaults", {}).get("ssh_key", "")
+                default_template = reinstall_defaults.get("reinstall_os", "debian12_64")
+                configured_key = reinstall_defaults.get("ssh_key", "")
                 if configured_key:
                     default_key = configured_key
                 else:
@@ -3188,7 +3189,7 @@ def run_bot(cfg: dict):
                 )
 
             elif op == "install":
-                default_template = cfg.get("defaults", {}).get("reinstall_os", "debian12_64")
+                default_template = reinstall_defaults.get("reinstall_os", "debian12_64")
                 keyboard = []
                 for choice in reinstall_template_choices(default_template):
                     keyboard.append([InlineKeyboardButton(
@@ -3226,7 +3227,7 @@ def run_bot(cfg: dict):
                         ]),
                     )
                     return
-                configured_key = cfg.get("defaults", {}).get("ssh_key", "")
+                configured_key = reinstall_defaults.get("ssh_key", "")
                 default_key = select_default_ssh_key(keys, configured_key)
                 ordered_keys = ([default_key] if default_key else []) + [key for key in keys if key != default_key]
                 keyboard = []
