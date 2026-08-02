@@ -98,6 +98,21 @@ class DiskSelectionTests(unittest.TestCase):
         self.assertEqual(bot.select_default_ssh_key(["key-a", "key-b"], "missing"), "key-a")
         self.assertIsNone(bot.select_default_ssh_key([]))
 
+    def test_servers_without_valid_disks_are_filtered(self):
+        self.assertEqual(bot.extract_installable_disk_groups({}), [])
+        self.assertEqual(bot.extract_installable_disk_groups({"diskGroups": []}), [])
+        self.assertEqual(
+            bot.extract_installable_disk_groups({
+                "diskGroups": [
+                    {"diskGroupId": None, "numberOfDisks": 2},
+                    {"diskGroupId": 1, "numberOfDisks": 0},
+                    {"diskGroupId": 3, "numberOfDisks": "unknown"},
+                    {"diskGroupId": 2, "numberOfDisks": 2, "diskType": "NVME"},
+                ]
+            }),
+            [{"diskGroupId": 2, "numberOfDisks": 2, "diskType": "NVME"}],
+        )
+
 
 class ServerPaginationTests(unittest.TestCase):
     def test_pages_respect_character_and_item_limits(self):
@@ -129,10 +144,19 @@ class ServerPaginationTests(unittest.TestCase):
         callbacks = [button["callback_data"] for row in rows for button in row]
         labels = [button["text"] for row in rows for button in row]
 
-        self.assertEqual(callbacks[0], "srv|install|srv2_123456")
+        self.assertEqual(callbacks[0], "srv|select|srv2_123456")
         self.assertIn("选择 2", labels[0])
         self.assertNotIn("srv|quick|srv2_123456", callbacks)
         self.assertIn("srvnote|clear|srv2_123456", callbacks)
+
+        selected_rows = bot.selected_server_action_specs("srv2_123456")
+        selected_callbacks = [
+            button["callback_data"] for row in selected_rows for button in row
+        ]
+        self.assertEqual(selected_callbacks, [
+            "srv|quick|srv2_123456",
+            "srv|install|srv2_123456",
+        ])
 
 
 class QuickBuySafetyTests(unittest.TestCase):
