@@ -99,6 +99,32 @@ class DiskSelectionTests(unittest.TestCase):
         self.assertIsNone(bot.select_default_ssh_key([]))
 
 
+class ServerPaginationTests(unittest.TestCase):
+    def test_pages_respect_character_and_item_limits(self):
+        entries = [
+            {"text": f"server-{index}\n" + ("x" * 70), "keyboard": [[index]]}
+            for index in range(7)
+        ]
+
+        pages = bot.paginate_server_entries(entries, max_chars=250, max_items=2)
+
+        self.assertEqual([len(page) for page in pages], [2, 2, 2, 1])
+        for page in pages:
+            self.assertLessEqual(sum(len(entry["text"]) for entry in page) + 2 * (len(page) - 1), 250)
+
+    def test_oversized_server_is_truncated_on_complete_lines(self):
+        entry = {
+            "text": "server\n" + "\n".join(f"`disk-{index}`" for index in range(100)),
+            "keyboard": [["install"]],
+        }
+
+        page = bot.paginate_server_entries([entry], max_chars=180, max_items=4)[0]
+
+        self.assertLessEqual(len(page[0]["text"]), 180)
+        self.assertIn("其余详情已省略", page[0]["text"])
+        self.assertEqual(page[0]["keyboard"], [["install"]])
+
+
 class QuickBuySafetyTests(unittest.TestCase):
     def test_batch_count_is_honored_and_stops_on_first_failure(self):
         results = [buy_result(True), buy_result(False, "sold out"), buy_result(True)]
