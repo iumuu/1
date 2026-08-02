@@ -7,6 +7,8 @@ set -Eeuo pipefail
 MD_DEVICE="${MD_DEVICE:-/dev/md0}"
 MOUNT_POINT="${MOUNT_POINT:-/mnt/raid0}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-${MOUNT_POINT}/downloads}"
+QB_SAVE_PATH_EXPLICIT=0
+[[ -n "${QB_SAVE_PATH+x}" ]] && QB_SAVE_PATH_EXPLICIT=1
 QB_SAVE_PATH="${QB_SAVE_PATH:-${DOWNLOAD_DIR}}"
 QB_URL=""
 QB_USERNAME=""
@@ -18,16 +20,20 @@ DOWNLOAD_OWNER="${DOWNLOAD_OWNER:-}"
 DRY_RUN=0
 ASSUME_YES=0
 INTERACTIVE_QB=0
+QB_ONLY=0
 
 usage() {
   cat <<'EOF'
-用法：sudo bash setup-hdd-raid0-qb2.sh [-q] [--dry-run] [--yes]
+用法：sudo bash setup-hdd-raid0-qb2.sh [-q | --qb-only] [--dry-run] [--yes]
+
+不带任何参数时进入中文功能菜单。
 
 脚本自动选择旋转式、非移动、可写、非系统盘且没有已挂载分区的整块 HDD。
 创建 RAID0 会清空所有候选硬盘上的数据。
 
 选项：
-  -q         交互输入 qBittorrent 端口、用户名和密码，并设置下载目录
+  -q         组建/挂载 RAID0 后，交互配置 qBittorrent 下载目录
+  --qb-only  只检测现有 RAID0 挂载路径并配置 qBittorrent，不修改 RAID
   --dry-run  只显示候选硬盘和操作，不修改任何内容
   --yes      跳过新建 RAID0 前的擦盘确认
   -h, --help 显示帮助
@@ -44,6 +50,7 @@ usage() {
 
 示例：
   sudo bash setup-hdd-raid0-qb2.sh -q
+  sudo bash setup-hdd-raid0-qb2.sh --qb-only
   sudo bash setup-hdd-raid0-qb2.sh -q --dry-run
   sudo bash setup-hdd-raid0-qb2.sh --dry-run
   sudo bash setup-hdd-raid0-qb2.sh
@@ -63,9 +70,86 @@ run() {
   fi
 }
 
+qb_login() {
+  cookie_file="$(mktemp)"
+  trap 'rm -f "$cookie_file"' EXIT
+  curl_common=(--silent --show-error --fail --cookie "$cookie_file" --cookie-jar "$cookie_file" --referer "$QB_URL/")
+  login_response="$(curl "${curl_common[@]}" \
+    --data-urlencode "username=$QB_USERNAME" \
+    --data-urlencode "password=$QB_PASSWORD" \
+    "$QB_URL/api/v2/auth/login")" || die "无法登录 qBittorrent：$QB_URL"
+  [[ "$login_response" == Ok. ]] || die "qBittorrent 登录失败：$login_response"
+  curl "${curl_common[@]}" "$QB_URL/api/v2/app/preferences" >/dev/null || \
+    die "无法读取 qBittorrent 设置，请检查端口、用户名和密码。"
+}
+
+qb_apply_path() {
+  run mkdir -p "$DOWNLOAD_DIR"
+  run chmod "$DOWNLOAD_MODE" "$DOWNLOAD_DIR"
+  if [[ -n "$DOWNLOAD_OWNER" ]]; then
+    run chown "$DOWNLOAD_OWNER" "$DOWNLOAD_DIR"
+  fi
+
+  if command -v docker >/dev/null 2>&1 && docker inspect qb2 >/dev/null 2>&1; then
+    docker_path_is_mapped=0
+    host_download_real="$(readlink -f "$DOWNLOAD_DIR")"
+    while IFS='|' read -r host_source container_destination; do
+      container_destination="${container_destination%/}"
+      if [[ "$QB_SAVE_PATH" == "$container_destination" || \
+            "$QB_SAVE_PATH" == "$container_destination"/* ]]; then
+        path_suffix="${QB_SAVE_PATH#"$container_destination"}"
+        mapped_host_path="$(readlink -f "${host_source%/}${path_suffix}")"
+        if [[ "$mapped_host_path" == "$host_download_real" ]]; then
+          docker_path_is_mapped=1
+          break
+        fi
+      fi
+    done < <(docker inspect --format '{{range .Mounts}}{{printf "%s|%s\n" .Source .Destination}}{{end}}' qb2)
+
+    ((docker_path_is_mapped == 1)) || \
+      die "qb2 容器中的 $QB_SAVE_PATH 没有映射到宿主机目录 $DOWNLOAD_DIR。"
+    docker exec qb2 test -d "$QB_SAVE_PATH" || \
+      die "qb2 容器无法访问 $QB_SAVE_PATH。请绑定 $DOWNLOAD_DIR 并用 QB_SAVE_PATH 指定容器内路径。"
+  fi
+
+  escaped_qb_path="${QB_SAVE_PATH//\\/\\\\}"
+  escaped_qb_path="${escaped_qb_path//\"/\\\"}"
+  preferences_json="{\"save_path\":\"$escaped_qb_path\"}"
+  curl "${curl_common[@]}" --data-urlencode "json=$preferences_json" \
+    "$QB_URL/api/v2/app/setPreferences" >/dev/null || \
+    die "无法修改 qBittorrent 下载目录。"
+
+  current_preferences="$(curl "${curl_common[@]}" "$QB_URL/api/v2/app/preferences")" || \
+    die "已提交 qBittorrent 设置，但无法回读验证。"
+  compact_preferences="$(tr -d '[:space:]' <<<"$current_preferences")"
+  returned_save_path="$(sed -n 's/.*"save_path":"\([^"]*\)".*/\1/p' <<<"$compact_preferences")"
+  [[ "${returned_save_path%/}" == "${QB_SAVE_PATH%/}" ]] || \
+    die "qBittorrent 返回的下载目录是 $returned_save_path，不是 $QB_SAVE_PATH。"
+}
+
+if (($# == 0)); then
+  while true; do
+    printf '\n请选择要执行的功能：\n'
+    printf '  1. 只检测并设置 RAID0\n'
+    printf '  2. 检测并设置 RAID0，同时配置 qBittorrent\n'
+    printf '  3. 只检测现有 RAID0 挂载路径并配置 qBittorrent\n'
+    printf '  0. 退出\n'
+    printf '请输入选项 [0-3]：'
+    read -r menu_choice || die "未读取到选择，操作已取消。"
+    case "$menu_choice" in
+      1) break ;;
+      2) INTERACTIVE_QB=1; break ;;
+      3) QB_ONLY=1; INTERACTIVE_QB=1; break ;;
+      0) log "操作已取消。"; exit 0 ;;
+      *) log "输入无效，请输入 0、1、2 或 3。" ;;
+    esac
+  done
+fi
+
 while (($#)); do
   case "$1" in
     -q) INTERACTIVE_QB=1 ;;
+    --qb-only) QB_ONLY=1; INTERACTIVE_QB=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --yes) ASSUME_YES=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -93,13 +177,32 @@ if ((INTERACTIVE_QB)); then
   QB_URL="http://127.0.0.1:${qb_port_number}"
 fi
 
-for command_name in lsblk findmnt mountpoint awk grep sed mdadm mkfs.ext4 tune2fs blkid mount umount wipefs; do
+if ((QB_ONLY)); then
+  required_commands=(lsblk awk grep sed mdadm curl readlink)
+else
+  required_commands=(lsblk findmnt mountpoint awk grep sed mdadm mkfs.ext4 tune2fs blkid mount umount wipefs)
+fi
+for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null 2>&1 || die "缺少命令：$command_name"
 done
-if ((INTERACTIVE_QB)); then
+if ((INTERACTIVE_QB && QB_ONLY == 0)); then
   for command_name in curl readlink; do
     command -v "$command_name" >/dev/null 2>&1 || die "缺少命令：$command_name"
   done
+fi
+
+if ((QB_ONLY)); then
+  [[ -b "$MD_DEVICE" ]] || die "未检测到现有 RAID 设备：$MD_DEVICE"
+  raid_level="$(mdadm --detail "$MD_DEVICE" | awk -F': ' '/Raid Level/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
+  [[ "$raid_level" == raid0 ]] || die "检测到 $MD_DEVICE，但它不是 RAID0。"
+  detected_mount_point="$(lsblk -nrpo MOUNTPOINT "$MD_DEVICE" | awk 'NF {print; exit}')"
+  [[ -n "$detected_mount_point" ]] || die "$MD_DEVICE 尚未挂载，无法检测下载路径。"
+  MOUNT_POINT="$detected_mount_point"
+  DOWNLOAD_DIR="${MOUNT_POINT%/}/downloads"
+  if ((QB_SAVE_PATH_EXPLICIT == 0)); then
+    QB_SAVE_PATH="$DOWNLOAD_DIR"
+  fi
+  log "检测到 $MD_DEVICE 挂载于 $MOUNT_POINT。"
 fi
 
 [[ "$MD_DEVICE" == /dev/* ]] || die "MD_DEVICE 必须是 /dev 下的绝对路径。"
@@ -112,6 +215,18 @@ fi
   die "路径只能包含字母、数字、下划线、点、斜杠和连字符。"
 [[ "$CHUNK_KIB" =~ ^[0-9]+$ ]] || die "CHUNK_KIB 必须是整数。"
 [[ "$DOWNLOAD_MODE" =~ ^0?[0-7]{3}$ ]] || die "DOWNLOAD_MODE 必须是 0777 这样的八进制权限。"
+
+if ((QB_ONLY)); then
+  if ((DRY_RUN)); then
+    run mkdir -p "$DOWNLOAD_DIR"
+    log "将把 qBittorrent 下载目录设置为 $QB_SAVE_PATH。"
+    exit 0
+  fi
+  qb_login
+  qb_apply_path
+  log "qBittorrent（$QB_URL）的下载目录已设置为 $QB_SAVE_PATH。"
+  exit 0
+fi
 
 declare -A system_disks=()
 for mount_target in / /boot /boot/efi; do
@@ -201,16 +316,7 @@ fi
 
 # Verify WebUI access before performing any destructive disk operation.
 if ((INTERACTIVE_QB)); then
-  cookie_file="$(mktemp)"
-  trap 'rm -f "$cookie_file"' EXIT
-  curl_common=(--silent --show-error --fail --cookie "$cookie_file" --cookie-jar "$cookie_file" --referer "$QB_URL/")
-  login_response="$(curl "${curl_common[@]}" \
-    --data-urlencode "username=$QB_USERNAME" \
-    --data-urlencode "password=$QB_PASSWORD" \
-    "$QB_URL/api/v2/auth/login")" || die "无法登录 qBittorrent：$QB_URL"
-  [[ "$login_response" == Ok. ]] || die "qBittorrent 登录失败：$login_response"
-  curl "${curl_common[@]}" "$QB_URL/api/v2/app/preferences" >/dev/null || \
-    die "无法读取 qBittorrent 设置，请检查端口、用户名和密码。"
+  qb_login
 fi
 
 if ((raid_exists == 0)); then
@@ -268,14 +374,6 @@ expected_device_number="$(lsblk -dnro MAJ:MIN "$MD_DEVICE")"
 mounted_device_number="$(findmnt -nro MAJ:MIN --target "$MOUNT_POINT")"
 [[ "$mounted_device_number" == "$expected_device_number" ]] || \
   die "$MOUNT_POINT 挂载的不是 $MD_DEVICE。"
-if ((INTERACTIVE_QB)); then
-  run mkdir -p "$DOWNLOAD_DIR"
-  run chmod "$DOWNLOAD_MODE" "$DOWNLOAD_DIR"
-  if [[ -n "$DOWNLOAD_OWNER" ]]; then
-    run chown "$DOWNLOAD_OWNER" "$DOWNLOAD_DIR"
-  fi
-fi
-
 # Record the array for assembly after reboot when the distribution has an mdadm config.
 if [[ -f /etc/mdadm/mdadm.conf ]]; then
   md_uuid="$(mdadm --detail "$MD_DEVICE" | awk -F': ' '/UUID/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
@@ -297,43 +395,7 @@ elif [[ -f /etc/mdadm.conf ]]; then
 fi
 
 if ((INTERACTIVE_QB)); then
-  # If qb2 is a Docker container, the API path must exist inside that container.
-  if command -v docker >/dev/null 2>&1 && docker inspect qb2 >/dev/null 2>&1; then
-    docker_path_is_mapped=0
-    host_download_real="$(readlink -f "$DOWNLOAD_DIR")"
-    while IFS='|' read -r host_source container_destination; do
-      container_destination="${container_destination%/}"
-      if [[ "$QB_SAVE_PATH" == "$container_destination" || \
-            "$QB_SAVE_PATH" == "$container_destination"/* ]]; then
-        path_suffix="${QB_SAVE_PATH#"$container_destination"}"
-        mapped_host_path="$(readlink -f "${host_source%/}${path_suffix}")"
-        if [[ "$mapped_host_path" == "$host_download_real" ]]; then
-          docker_path_is_mapped=1
-          break
-        fi
-      fi
-    done < <(docker inspect --format '{{range .Mounts}}{{printf "%s|%s\n" .Source .Destination}}{{end}}' qb2)
-
-    ((docker_path_is_mapped == 1)) || \
-      die "qb2 容器中的 $QB_SAVE_PATH 没有映射到宿主机目录 $DOWNLOAD_DIR。RAID0 已设置完成。"
-    if ! docker exec qb2 test -d "$QB_SAVE_PATH"; then
-      die "qb2 容器无法访问 $QB_SAVE_PATH。请绑定 $DOWNLOAD_DIR 并用 QB_SAVE_PATH 指定容器内路径。RAID0 已设置完成。"
-    fi
-  fi
-
-  escaped_qb_path="${QB_SAVE_PATH//\\/\\\\}"
-  escaped_qb_path="${escaped_qb_path//\"/\\\"}"
-  preferences_json="{\"save_path\":\"$escaped_qb_path\"}"
-  curl "${curl_common[@]}" --data-urlencode "json=$preferences_json" \
-    "$QB_URL/api/v2/app/setPreferences" >/dev/null || \
-    die "无法修改 qBittorrent 下载目录。"
-
-  current_preferences="$(curl "${curl_common[@]}" "$QB_URL/api/v2/app/preferences")" || \
-    die "已提交 qBittorrent 设置，但无法回读验证。"
-  compact_preferences="$(tr -d '[:space:]' <<<"$current_preferences")"
-  returned_save_path="$(sed -n 's/.*"save_path":"\([^"]*\)".*/\1/p' <<<"$compact_preferences")"
-  [[ "${returned_save_path%/}" == "${QB_SAVE_PATH%/}" ]] || \
-    die "qBittorrent 返回的下载目录是 $returned_save_path，不是 $QB_SAVE_PATH。"
+  qb_apply_path
 fi
 
 log "RAID0 设置完成：$MD_DEVICE 已挂载到 $MOUNT_POINT。"
