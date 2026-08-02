@@ -332,6 +332,26 @@ def select_default_ssh_key(keys: list, configured_key: str = ""):
     return cleaned[0] if cleaned else None
 
 
+def extract_installable_disk_groups(hardware: dict) -> list:
+    """只保留 OVH 返回的有效物理磁盘组；无磁盘的暂停/删机服务会被过滤。"""
+    if not isinstance(hardware, dict):
+        return []
+    groups = hardware.get("diskGroups")
+    if not isinstance(groups, list):
+        return []
+    valid = []
+    for group in groups:
+        if not isinstance(group, dict) or group.get("diskGroupId") is None:
+            continue
+        try:
+            disk_count = int(group.get("numberOfDisks") or 0)
+        except (TypeError, ValueError):
+            continue
+        if disk_count > 0:
+            valid.append(group)
+    return valid
+
+
 SERVER_LIST_PAGE_TEXT_LIMIT = 3400
 SERVER_LIST_PAGE_SIZE = 4
 
@@ -394,7 +414,7 @@ def paginate_server_entries(
 def server_list_action_specs(index: int, action_id: str, has_note: bool = False) -> list:
     """服务器列表只负责选中目标，一键安装入口放在选择后的页面。"""
     rows = [[
-        {"text": f"🖥️ 选择 {index}", "callback_data": f"srv|install|{action_id}"},
+        {"text": f"🖥️ 选择 {index}", "callback_data": f"srv|select|{action_id}"},
         {"text": f"🔄 重启 {index}", "callback_data": f"srv|reboot|{action_id}"},
     ]]
     if has_note:
@@ -402,6 +422,21 @@ def server_list_action_specs(index: int, action_id: str, has_note: bool = False)
             "text": f"📝 清除 {index} 的“没中”",
             "callback_data": f"srvnote|clear|{action_id}",
         }])
+    return rows
+
+
+def selected_server_action_specs(action_id: str, quick_available: bool = True) -> list:
+    """选中服务器后再提供一键安装和手动安装。"""
+    rows = []
+    if quick_available:
+        rows.append([{
+            "text": "⚡ 一键 Debian 12 + 默认密钥 + RAID0",
+            "callback_data": f"srv|quick|{action_id}",
+        }])
+    rows.append([{
+        "text": "💿 手动选择系统",
+        "callback_data": f"srv|install|{action_id}",
+    }])
     return rows
 
 
@@ -2447,9 +2482,16 @@ def run_bot(cfg: dict):
             server_items = []
             for s in servers:
                 hw = await asyncio.to_thread(ovh_client.get_server_hardware, s["name"])
-                disk_groups = hw.get("diskGroups", []) if isinstance(hw, dict) else []
+                disk_groups = extract_installable_disk_groups(hw)
+                if not disk_groups:
+                    logger.info("/servers 隐藏无有效磁盘组的服务: %s", s["name"])
+                    continue
                 default_group = hw.get("defaultDiskGroupId") if isinstance(hw, dict) else None
                 server_items.append((s, disk_groups, default_group))
+
+            if not server_items:
+                await msg.edit_text("📭 没有找到带有效磁盘组的服务器\n\n已隐藏退款后被 OVH 暂停或等待删机的无磁盘服务。")
+                return
 
             session_id = str(int(time.time() * 1000))[-10:]
             entries = []
@@ -2868,7 +2910,30 @@ def run_bot(cfg: dict):
                 return
             service_name = action["service_name"]
 
-            if op == "quick":
+            if op == "select":
+                keyboard = [
+                    [InlineKeyboardButton(**button) for button in row]
+                    for row in selected_server_action_specs(
+                        action_id,
+                        bool(select_default_raid_group(
+                            action.get("disk_groups", []), action.get("default_group")
+                        )),
+                    )
+                ]
+                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_text(
+                    f"🖥️ *已选择服务器*\n\n服务器: `{service_name}`"
+                    + (f"\nIP: `{action.get('ip')}`" if action.get("ip") else "")
+                    + "\n\n请选择安装方式：",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+            elif op == "quick":
+                await query.edit_message_text(
+                    f"⏳ 正在准备一键安装...\n\n服务器: `{service_name}`",
+                    parse_mode="Markdown",
+                )
                 templates, keys = await asyncio.gather(
                     asyncio.to_thread(ovh_client.get_server_templates, service_name),
                     asyncio.to_thread(ovh_client.list_ssh_keys),
@@ -2951,7 +3016,21 @@ def run_bot(cfg: dict):
                 )
 
             elif op == "install":
+                await query.edit_message_text(
+                    f"⏳ 正在获取可安装系统...\n\n服务器: `{service_name}`",
+                    parse_mode="Markdown",
+                )
                 templates = await asyncio.to_thread(ovh_client.get_server_templates, service_name)
+                if not templates:
+                    await query.edit_message_text(
+                        f"❌ 获取可安装系统失败\n\n服务器: `{service_name}`\n请稍后重试。",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("⬅️ 返回服务器", callback_data=f"srv|select|{action_id}"),
+                            InlineKeyboardButton("取消", callback_data="cancel"),
+                        ]]),
+                    )
+                    return
                 preferred = [
                     "debian12_64", "debian13_64",
                     "ubuntu2404-server_64", "ubuntu2204-server_64",
@@ -2962,15 +3041,6 @@ def run_bot(cfg: dict):
                 if not available:
                     available = templates[:8]
                 keyboard = []
-                quick_template = cfg.get("defaults", {}).get("reinstall_os", "debian12_64")
-                if (
-                    quick_template in templates
-                    and select_default_raid_group(action.get("disk_groups", []), action.get("default_group"))
-                ):
-                    keyboard.append([InlineKeyboardButton(
-                        "⚡ 一键 Debian 12 + 默认密钥 + RAID0",
-                        callback_data=f"srv|quick|{action_id}",
-                    )])
                 template_labels = {
                     "debian12_64": "Debian 12 (默认)",
                     "debian13_64": "Debian 13",
@@ -2981,11 +3051,14 @@ def run_bot(cfg: dict):
                     keyboard.append([InlineKeyboardButton(
                         template_labels.get(t, t), callback_data=f"srv|os|{action_id}|{t}"
                     )])
-                keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回服务器", callback_data=f"srv|select|{action_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel"),
+                ])
                 await query.edit_message_text(
-                    f"🖥️ *已选择服务器*\n\n服务器: `{service_name}`"
+                    f"💿 *手动选择系统*\n\n服务器: `{service_name}`"
                     + (f"\nIP: `{action.get('ip')}`" if action.get("ip") else "")
-                    + "\n\n请选择一键安装或手动选择系统：",
+                    + "\n\n请选择系统：",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
