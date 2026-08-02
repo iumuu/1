@@ -17,14 +17,17 @@ FS_LABEL="${FS_LABEL:-raid0}"
 CHUNK_KIB="${CHUNK_KIB:-512}"
 DOWNLOAD_MODE="${DOWNLOAD_MODE:-0777}"
 DOWNLOAD_OWNER="${DOWNLOAD_OWNER:-}"
+SWAP_FILE="${SWAP_FILE:-/swapfile}"
+SWAP_SIZE_GIB="${SWAP_SIZE_GIB:-}"
 DRY_RUN=0
 ASSUME_YES=0
 INTERACTIVE_QB=0
 QB_ONLY=0
+SWAP_ONLY=0
 
 usage() {
   cat <<'EOF'
-用法：sudo bash setup-hdd-raid0-qb2.sh [-q | --qb-only] [--dry-run] [--yes]
+用法：sudo bash setup-hdd-raid0-qb2.sh [-q | --qb-only | --swap] [--dry-run] [--yes]
 
 不带任何参数时进入中文功能菜单。
 
@@ -34,6 +37,7 @@ usage() {
 选项：
   -q         组建/挂载 RAID0 后，交互配置 qBittorrent 下载目录
   --qb-only  只检测现有 RAID0 挂载路径并配置 qBittorrent，不修改 RAID
+  --swap     只创建或重建 Swap 文件，容量可自定义
   --dry-run  只显示候选硬盘和操作，不修改任何内容
   --yes      跳过新建 RAID0 前的擦盘确认
   -h, --help 显示帮助
@@ -47,10 +51,13 @@ usage() {
   CHUNK_KIB       RAID0 块大小，单位 KiB            （默认：512）
   DOWNLOAD_MODE   下载目录权限                      （默认：0777）
   DOWNLOAD_OWNER  可选目录所有者，如 1000:1000     （默认：不修改）
+  SWAP_FILE       Swap 文件路径                    （默认：/swapfile）
+  SWAP_SIZE_GIB   Swap 容量，单位 GiB              （默认：交互输入）
 
 示例：
   sudo bash setup-hdd-raid0-qb2.sh -q
   sudo bash setup-hdd-raid0-qb2.sh --qb-only
+  sudo bash setup-hdd-raid0-qb2.sh --swap
   sudo bash setup-hdd-raid0-qb2.sh -q --dry-run
   sudo bash setup-hdd-raid0-qb2.sh --dry-run
   sudo bash setup-hdd-raid0-qb2.sh
@@ -127,21 +134,88 @@ qb_apply_path() {
     die "qBittorrent 返回的下载目录是 $returned_save_path，不是 $QB_SAVE_PATH。"
 }
 
+setup_swap() {
+  [[ "$SWAP_FILE" == /* && "$SWAP_FILE" != / ]] || \
+    die "SWAP_FILE 必须是有效的绝对文件路径，且不能是根目录。"
+  [[ "$SWAP_FILE" =~ ^[A-Za-z0-9_./-]+$ ]] || \
+    die "Swap 文件路径只能包含字母、数字、下划线、点、斜杠和连字符。"
+  [[ "$SWAP_SIZE_GIB" =~ ^[1-9][0-9]*$ ]] && \
+    ((SWAP_SIZE_GIB <= 1024)) || die "Swap 容量必须是 1 到 1024 之间的整数 GiB。"
+  [[ ! -L "$SWAP_FILE" ]] || die "$SWAP_FILE 是符号链接，拒绝覆盖。"
+  [[ ! -e "$SWAP_FILE" || -f "$SWAP_FILE" ]] || die "$SWAP_FILE 不是普通文件，拒绝覆盖。"
+
+  swap_parent="$(dirname "$SWAP_FILE")"
+  run mkdir -p "$swap_parent"
+  swap_fs_type="$(findmnt -nro FSTYPE --target "$swap_parent")"
+  [[ "$swap_fs_type" != btrfs ]] || \
+    die "检测到 Btrfs 文件系统；本脚本不在 Btrfs 上自动创建 Swap 文件。"
+
+  if [[ -e "$SWAP_FILE" ]]; then
+    while true; do
+      printf '检测到已有 %s，是否按 %s GiB 重建？请输入 yes 或 no：' "$SWAP_FILE" "$SWAP_SIZE_GIB"
+      read -r swap_answer || die "未读取到回答，操作已取消。"
+      case "$swap_answer" in
+        yes) break ;;
+        no) log "保留现有 Swap 文件，未做修改。"; return 0 ;;
+        *) log "输入无效，请完整输入 yes 或 no。" ;;
+      esac
+    done
+  fi
+
+  swap_is_active=0
+  if swapon --show=NAME --noheadings | awk '{$1=$1; print}' | grep -Fxq "$SWAP_FILE"; then
+    swap_is_active=1
+  fi
+
+  if ((DRY_RUN)); then
+    ((swap_is_active == 0)) || run swapoff "$SWAP_FILE"
+    run rm -f -- "$SWAP_FILE"
+    run fallocate -l "${SWAP_SIZE_GIB}G" "$SWAP_FILE"
+    run chmod 0600 "$SWAP_FILE"
+    run mkswap "$SWAP_FILE"
+    run swapon "$SWAP_FILE"
+    log "将确保 /etc/fstab 包含：$SWAP_FILE none swap sw 0 0"
+    return 0
+  fi
+
+  ((swap_is_active == 0)) || swapoff "$SWAP_FILE"
+  rm -f -- "$SWAP_FILE"
+  if ! fallocate -l "${SWAP_SIZE_GIB}G" "$SWAP_FILE"; then
+    log "fallocate 失败，改用 dd 创建 Swap 文件。"
+    rm -f -- "$SWAP_FILE"
+    dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$((SWAP_SIZE_GIB * 1024))" status=progress conv=fsync
+  fi
+  chmod 0600 "$SWAP_FILE"
+  mkswap "$SWAP_FILE" >/dev/null
+  swapon "$SWAP_FILE"
+
+  if ! awk -v file="$SWAP_FILE" '$1 == file && $3 == "swap" {found=1} END {exit !found}' /etc/fstab; then
+    printf '%s none swap sw 0 0\n' "$SWAP_FILE" >>/etc/fstab
+    log "已将 $SWAP_FILE 写入 /etc/fstab。"
+  fi
+
+  swapon --show=NAME,SIZE,USED,PRIO | grep -F "$SWAP_FILE" || \
+    die "Swap 文件已创建，但启用状态验证失败。"
+  log "Swap 设置完成：$SWAP_FILE，容量 ${SWAP_SIZE_GIB} GiB。"
+}
+
 if (($# == 0)); then
   while true; do
     printf '\n请选择要执行的功能：\n'
     printf '  1. 只检测并设置 RAID0\n'
     printf '  2. 检测并设置 RAID0，同时配置 qBittorrent\n'
     printf '  3. 只检测现有 RAID0 挂载路径并配置 qBittorrent\n'
+    printf '  4. 创建或重建 Swap 文件（容量自定义）\n'
     printf '  0. 退出\n'
-    printf '请输入选项 [0-3]：'
+    printf '请输入选项 [0-4]：'
     read -r menu_choice || die "未读取到选择，操作已取消。"
     case "$menu_choice" in
       1) break ;;
       2) INTERACTIVE_QB=1; break ;;
       3) QB_ONLY=1; INTERACTIVE_QB=1; break ;;
+      4) SWAP_ONLY=1; break ;;
       0) log "操作已取消。"; exit 0 ;;
-      *) log "输入无效，请输入 0、1、2 或 3。" ;;
+      *) log "输入无效，请输入 0、1、2、3 或 4。" ;;
     esac
   done
 fi
@@ -150,6 +224,7 @@ while (($#)); do
   case "$1" in
     -q) INTERACTIVE_QB=1 ;;
     --qb-only) QB_ONLY=1; INTERACTIVE_QB=1 ;;
+    --swap) SWAP_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --yes) ASSUME_YES=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -159,6 +234,17 @@ while (($#)); do
 done
 
 ((EUID == 0)) || die "请使用 root 用户运行（sudo）。"
+
+if ((SWAP_ONLY && INTERACTIVE_QB)); then
+  die "--swap 不能与 -q 或 --qb-only 同时使用。"
+fi
+
+if ((SWAP_ONLY)); then
+  if [[ -z "$SWAP_SIZE_GIB" ]]; then
+    printf '请输入 Swap 容量（GiB，1-1024）：'
+    read -r SWAP_SIZE_GIB || die "未读取到 Swap 容量，操作已取消。"
+  fi
+fi
 
 if ((INTERACTIVE_QB)); then
   printf '请输入 qBittorrent WebUI 端口：'
@@ -177,7 +263,9 @@ if ((INTERACTIVE_QB)); then
   QB_URL="http://127.0.0.1:${qb_port_number}"
 fi
 
-if ((QB_ONLY)); then
+if ((SWAP_ONLY)); then
+  required_commands=(awk grep findmnt swapon swapoff mkswap dd chmod rm mkdir dirname)
+elif ((QB_ONLY)); then
   required_commands=(lsblk awk grep sed mdadm curl readlink)
 else
   required_commands=(lsblk findmnt mountpoint awk grep sed mdadm mkfs.ext4 tune2fs blkid mount umount wipefs)
@@ -189,6 +277,11 @@ if ((INTERACTIVE_QB && QB_ONLY == 0)); then
   for command_name in curl readlink; do
     command -v "$command_name" >/dev/null 2>&1 || die "缺少命令：$command_name"
   done
+fi
+
+if ((SWAP_ONLY)); then
+  setup_swap
+  exit 0
 fi
 
 if ((QB_ONLY)); then
