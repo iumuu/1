@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -62,6 +63,12 @@ auto_buy = true
         self.assertIs(cfg["monitor"]["auto_buy"], True)
         self.assertEqual(cfg["monitor"]["max_orders"], 3)
         self.assertEqual(cfg["monitor"]["interval"], 20)
+
+
+class OVHCallTests(unittest.IsolatedAsyncioTestCase):
+    async def test_blocking_ovh_call_times_out_with_readable_error(self):
+        with self.assertRaisesRegex(TimeoutError, "OVH API 0.01 秒无响应"):
+            await bot.run_ovh_call(time.sleep, 0.05, timeout=0.01)
 
 
 class DiskSelectionTests(unittest.TestCase):
@@ -157,6 +164,15 @@ class ServerPaginationTests(unittest.TestCase):
             "srv|quick|srv2_123456",
             "srv|install|srv2_123456",
         ])
+
+    def test_system_choices_do_not_require_compatible_templates_api(self):
+        choices = bot.reinstall_template_choices("debian12_64")
+
+        self.assertEqual(choices[0], {
+            "template": "debian12_64",
+            "label": "Debian 12 (默认)",
+        })
+        self.assertIn("ubuntu2404-server_64", [item["template"] for item in choices])
 
 
 class QuickBuySafetyTests(unittest.TestCase):
