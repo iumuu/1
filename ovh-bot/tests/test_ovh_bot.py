@@ -167,6 +167,16 @@ class DiskSelectionTests(unittest.TestCase):
 
 
 class ServerPaginationTests(unittest.TestCase):
+    def test_servers_listing_does_not_use_install_api_timeout(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        servers_start = source.index("    async def servers_cmd")
+        servers_end = source.index("    async def keys_cmd", servers_start)
+        servers_source = source[servers_start:servers_end]
+
+        self.assertIn("asyncio.to_thread(ovh_client.list_servers)", servers_source)
+        self.assertIn("asyncio.to_thread(ovh_client.get_server_hardware", servers_source)
+        self.assertNotIn("run_ovh_call(", servers_source)
+
     def test_pages_respect_character_and_item_limits(self):
         entries = [
             {"text": f"server-{index}\n" + ("x" * 70), "keyboard": [[index]]}
