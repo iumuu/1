@@ -124,6 +124,16 @@ class ServerPaginationTests(unittest.TestCase):
         self.assertIn("其余详情已省略", page[0]["text"])
         self.assertEqual(page[0]["keyboard"], [["install"]])
 
+    def test_server_list_selects_before_offering_quick_install(self):
+        rows = bot.server_list_action_specs(2, "srv2_123456", has_note=True)
+        callbacks = [button["callback_data"] for row in rows for button in row]
+        labels = [button["text"] for row in rows for button in row]
+
+        self.assertEqual(callbacks[0], "srv|install|srv2_123456")
+        self.assertIn("选择 2", labels[0])
+        self.assertNotIn("srv|quick|srv2_123456", callbacks)
+        self.assertIn("srvnote|clear|srv2_123456", callbacks)
+
 
 class QuickBuySafetyTests(unittest.TestCase):
     def test_batch_count_is_honored_and_stops_on_first_failure(self):
