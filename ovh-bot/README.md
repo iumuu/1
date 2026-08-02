@@ -9,8 +9,9 @@
 - 📡 **内置监控** — 有货自动下单，可设下单次数，到量自动停
 - 🔍 **全配置检测** — 修复旧脚本只看第一个配置的 BUG
 - 📊 **价格显示** — `/check` 有货配置实时查价
-- 🏷️ **友好名称** — `/buy ks-1-b fra nvme` 代替难记的 planCode
+- 🏷️ **友好名称** — `/buy ks-1-b` 后通过按钮选择配置和机房
 - 💬 **转发即下单** — 直接转发 OVH 到货信息自动识别下单
+- 🔒 **默认拒绝匿名操作** — 未配置 Telegram 用户白名单时 Bot 拒绝启动
 
 ## 🚀 Docker 部署（推荐）
 
@@ -29,7 +30,10 @@ OVH_CONSUMER_KEY=你的Consumer_Key
 OVH_ZONE=IE
 TG_BOT_TOKEN=你的Bot_Token
 TG_ALLOWED_USERS=你的TG用户ID
+TG_ALLOW_ALL_USERS=false
 TG_CHAT_ID=你的TG_Chat_ID
+MONITOR_AUTO_BUY=false
+MONITOR_MAX_ORDERS=1
 EOF
 
 # 3. 构建并启动
@@ -140,8 +144,17 @@ zone = "IE"                # 关键！决定下单区域
 [telegram]
 bot_token = "你的Bot_Token"
 allowed_users = [你的TG用户ID]
+allow_all_users = false
 chat_id = "你的TG_Chat_ID"
+
+[defaults]
+reinstall_os = "debian12_64"
+# 留空时，一键安装使用 OVH 账号中的第一个 SSH 密钥
+ssh_key = ""
 ```
+
+`allowed_users` 必须至少配置一个用户。只有明确需要公开 Bot 时，才设置
+`TG_ALLOW_ALL_USERS=true` 或 `allow_all_users = true`；公开 Bot 能触发下单，风险很高。
 
 ### 启动
 
@@ -156,6 +169,10 @@ python3 bot.py buy ks-1-b --dc fra
 # 监控模式
 python3 monitor.py ks-1-b ks-stor
 ```
+
+Telegram Bot 的 `/watch` 会用按钮选择“自动下单（默认）”或“仅通知”，不需要设置
+环境变量；创建后也可在 `/watchlist` 中随时切换。旧版已保存的监控任务继续按自动
+下单运行。独立 `monitor.py` 仍使用 `[monitor]` 配置，和 Telegram 按钮互不影响。
 
 ## 🔑 获取凭证
 
@@ -181,11 +198,9 @@ python3 monitor.py ks-1-b ks-stor
 
 | 命令 | 说明 |
 |------|------|
-| `/buy ks-1-b fra nvme` | 抢购 KS-1-B 法兰克福 NVMe 版 |
-| `/buy ks-1-b fra hdd` | 抢购 KS-1-B 法兰克福 HDD 版 |
-| `/buy ks-1-b fra 2x500nvme` | 精确指定 2x500GB NVMe |
-| `/buy ks-stor lon` | 抢购 KS-STOR 伦敦 |
-| `/buy ks-2` | 不限机房，有货就下 |
+| `/buy ks-1-b` | 查询 KS-1-B，并通过按钮选择硬件、机房和数量 |
+| `/buy ks-stor` | 查询 KS-STOR 可抢配置 |
+| `/buy ks-2` | 查询 KS-2 可抢配置 |
 | `/check ks-1-b` | 查看所有配置可用性+价格 |
 | `/catalog` | 查看服务器目录 |
 
@@ -193,9 +208,8 @@ python3 monitor.py ks-1-b ks-stor
 
 | 命令 | 说明 |
 |------|------|
-| `/watch ks-1-b fra nvme` | 监控 KS-1-B 法兰克福 NVMe，下1单后自动停 |
-| `/watch ks-1-b nvme 2` | 监控 KS-1-B NVMe，下2单后自动停 |
-| `/watch ks-stor lon 1` | 监控 KS-STOR 伦敦，下1单后自动停 |
+| `/watch ks-1-b` | 通过按钮选择配置、机房、下单上限和自动下单/仅通知模式 |
+| `/watch ks-stor` | 设置 KS-STOR 监控 |
 | `/unwatch ks-1-b` | 取消监控 |
 | `/unwatch` | 取消所有监控 |
 | `/watchlist` | 查看当前监控列表 |
@@ -206,6 +220,17 @@ python3 monitor.py ks-1-b ks-stor
 |------|------|
 | `/pay 123456789` | 获取订单付款链接 |
 | `/status 123456789` | 查看订单状态 |
+
+### 🖥️ 服务器管理
+
+`/servers` 中的服务器名称、系统、机房和 IP 均使用代码格式，IP 可直接复制。
+
+- “一键安装”预设为 `debian12_64`、默认 OVH SSH 密钥和默认磁盘组 RAID0。
+- 一键安装仍需二次确认；缺少模板、密钥或同组至少两块磁盘时会拒绝提交。
+- 手动安装盘选择会明确标注 NVMe SSD、SSD、HDD、容量、数量和 `diskGroupId`。
+- RAID0 始终只使用一个磁盘组，不会把 SSD 和 HDD 混合组阵列。
+- 安装进度全程显示 IP；安装完成后可点击“标记没中”。备注保存在
+  `data/server_notes.json`，以后执行 `/servers` 会继续显示。
 
 ### 存储关键词
 
@@ -231,7 +256,7 @@ python3 monitor.py ks-1-b ks-stor
 | `advance-1` | 24adv01-v3 | AMD EPYC 4244P |
 | ... | ... | ... |
 
-> 也可以直接用 planCode，如 `/buy 26sk10b-v1 fra nvme`
+> 也可以直接用 planCode，如 `/buy 26sk10b-v1`，再通过按钮选择配置。
 
 ## 🔧 修复的 BUG（vs coolci/OVH）
 

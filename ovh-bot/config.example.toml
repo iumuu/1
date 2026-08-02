@@ -18,6 +18,8 @@ zone = "IE"
 bot_token = ""
 # 允许使用的用户 ID（你的 TG 用户 ID），多个用逗号分隔
 allowed_users = []
+# 安全默认值：白名单为空时拒绝启动。只有明确需要公开 Bot 时才改为 true
+allow_all_users = false
 # 监控通知的 chat_id（可以是你的用户 ID 或群组 ID）
 chat_id = ""
 
@@ -27,8 +29,12 @@ chat_id = ""
 watch_list = []
 # 检查间隔（秒），建议 10-30
 interval = 10
-# 发现有货时自动下单（true）还是只通知（false）
-auto_buy = true
+# 发现有货时自动下单（true）还是只通知（false）；建议先以通知模式验证配置
+auto_buy = false
+# 独立 monitor.py 本次运行最多成功下单数
+max_orders = 1
+# 同一配置两次下单尝试的最短间隔（秒，最小 30）
+order_cooldown = 120
 # 限制只监控特定数据中心，留空表示监控全部
 # 例如: "fra" 只监控法兰克福
 datacenter = ""
@@ -36,6 +42,10 @@ datacenter = ""
 [defaults]
 # 默认操作系统: none_64.en / debian_12_64 / ubuntu_24_04_64
 os = "none_64.en"
+# /servers 一键重装默认系统
+reinstall_os = "debian12_64"
+# 一键重装优先使用的 OVH SSH 密钥名；留空时使用账号中的第一个密钥
+ssh_key = ""
 # 默认时长
 duration = "P1M"
 # 自动分配购物车

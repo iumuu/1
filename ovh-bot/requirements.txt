@@ -1,3 +1,4 @@
 python-telegram-bot==22.8
 ovh==1.2.0
-requests>=2.28
+requests>=2.28,<3
+tomli>=2.0; python_version < "3.11"

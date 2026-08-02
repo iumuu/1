@@ -11,7 +11,9 @@ RUN apk add --no-cache tzdata && \
     echo "Asia/Shanghai" > /etc/timezone && \
     apk del tzdata
 
-ENV TZ=Asia/Shanghai
+ENV TZ=Asia/Shanghai \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 # 数据持久化目录
 ENV OVH_BOT_DATA_DIR=/app/data
@@ -36,6 +38,7 @@ ENV OVH_CONSUMER_KEY=""
 ENV OVH_ZONE=IE
 ENV TG_BOT_TOKEN=""
 ENV TG_ALLOWED_USERS=""
+ENV TG_ALLOW_ALL_USERS=false
 ENV TG_CHAT_ID=""
 
 # 配置文件挂载点

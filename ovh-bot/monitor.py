@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from bot import (
     OVHClient, load_config, parse_plan_code, parse_datacenter,
     guess_server_type, format_memory, format_storage,
-    DC_DISPLAY_MAP, UNAVAILABLE_STATES,
+    DC_DISPLAY_MAP, UNAVAILABLE_STATES, _parse_bool,
 )
 
 logger = logging.getLogger("ovh-monitor")
@@ -42,18 +42,21 @@ class AvailabilityMonitor:
         self.tg_token = cfg.get("telegram", {}).get("bot_token", "")
         self.chat_id = str(cfg.get("telegram", {}).get("chat_id", "") or
                            os.environ.get("TG_CHAT_ID", ""))
-        self.interval = cfg.get("monitor", {}).get("interval", 10)
-        self.watch_list = cfg.get("monitor", {}).get("watch_list", [])
-        self.auto_buy = cfg.get("monitor", {}).get("auto_buy", True)
+        monitor_cfg = cfg.get("monitor", {})
+        self.interval = max(5, int(monitor_cfg.get("interval", 10)))
+        self.watch_list = [str(item).strip() for item in monitor_cfg.get("watch_list", []) if str(item).strip()]
+        self.auto_buy = _parse_bool(monitor_cfg.get("auto_buy", False))
+        self.max_orders = max(1, min(int(monitor_cfg.get("max_orders", 1)), 100))
+        self.orders_placed = 0
         self.default_dc = (cfg.get("monitor", {}).get("datacenter") or
-                           cfg.get("defaults", {}).get("datacenter", ""))
+                           cfg.get("defaults", {}).get("datacenter", "")).lower()
 
         # 状态跟踪: key = "planCode|dc|fqn", value = status
         # 这样每种配置组合在同一个数据中心都能独立追踪
         self.last_status = {}
-        # 防重复下单: key 同上, value = timestamp
-        self.recently_ordered = {}
-        self.order_cooldown = 120  # 2 分钟防重复
+        # 防重复尝试: key 同上, value = timestamp。失败也进入冷却，避免刷 API。
+        self.recent_attempts = {}
+        self.order_cooldown = max(30, int(monitor_cfg.get("order_cooldown", 120)))
 
     def send_telegram(self, text: str, reply_markup=None):
         """发送 Telegram 消息"""
@@ -133,90 +136,107 @@ class AvailabilityMonitor:
                 # 有货的情况
                 is_new = old_status is None
                 became_available = (old_status in UNAVAILABLE_STATES)
-                is_available = not is_new and old_status not in UNAVAILABLE_STATES
+                remains_available = not is_new and old_status not in UNAVAILABLE_STATES
+                should_notify = is_new or became_available
+                should_attempt = self.auto_buy and (should_notify or remains_available)
 
-                if is_new or became_available:
-                    # 检查是否最近刚下过单
-                    now = time.time()
-                    if key in self.recently_ordered:
-                        elapsed = now - self.recently_ordered[key]
-                        if elapsed < self.order_cooldown:
-                            logger.info(f"跳过 {key}，2分钟内已下单")
-                            continue
+                if not should_notify and not should_attempt:
+                    continue
 
-                    reason = "首次检查发现" if is_new else "从无货变为有货"
+                now = time.time()
+                last_attempt = self.recent_attempts.get(key)
+                if should_attempt and last_attempt is not None:
+                    elapsed = now - last_attempt
+                    if elapsed < self.order_cooldown:
+                        logger.info(f"跳过 {key}，下次尝试还需 {self.order_cooldown - int(elapsed)} 秒")
+                        continue
+
+                if self.auto_buy and self.orders_placed >= self.max_orders:
+                    if should_notify:
+                        logger.info(f"{key} 有货，但已达到下单上限 {self.max_orders}")
+                    continue
+
+                reason = (
+                    "首次检查发现" if is_new
+                    else "从无货变为有货" if became_available
+                    else "持续有货，冷却结束后重试"
+                )
+                if should_notify:
                     logger.info(f"🔥 {plan_code} {mem_display}+{stor_display} @ {dc}: {reason}")
 
-                    # 构建 Telegram 消息
-                    dc_display = DC_DISPLAY_MAP.get(dc, dc)
-                    text = (
-                        f"🔥 *服务器有货！*\n\n"
-                        f"📦 服务器: `{plan_code}`\n"
-                        f"💾 内存: {mem_display}\n"
-                        f"💿 存储: {stor_display}\n"
-                        f"📍 数据中心: {dc_display}\n"
-                        f"📊 状态: {status}\n"
-                        f"🕐 时间: {self._now_str()}\n"
+                dc_display = DC_DISPLAY_MAP.get(dc, dc)
+                text = (
+                    f"🔥 *服务器有货！*\n\n"
+                    f"📦 服务器: `{plan_code}`\n"
+                    f"💾 内存: {mem_display}\n"
+                    f"💿 存储: {stor_display}\n"
+                    f"📍 数据中心: {dc_display}\n"
+                    f"📊 状态: {status}\n"
+                    f"🕐 时间: {self._now_str()}\n"
+                )
+
+                if self.auto_buy:
+                    text += f"\n🚀 正在自动下单... ({self.orders_placed + 1}/{self.max_orders})"
+                    self.send_telegram(text)
+                    self.recent_attempts[key] = now
+
+                    # 精确传入当前有货配置，避免下成同机房的其它硬件组合。
+                    server_type = guess_server_type(plan_code)
+                    result = self.client.quick_buy(
+                        plan_code=plan_code,
+                        server_type=server_type,
+                        datacenter=dc,
+                        target_memory=memory,
+                        target_storage=storage,
                     )
 
-                    if self.auto_buy:
-                        text += "\n🚀 正在自动下单..."
-                        self.send_telegram(text)
-
-                        # 自动抢购
-                        server_type = guess_server_type(plan_code)
-                        result = self.client.quick_buy(
-                            plan_code=plan_code,
-                            server_type=server_type,
-                            datacenter=dc,
+                    if result["success"]:
+                        self.orders_placed += 1
+                        buy_text = (
+                            f"✅ *自动抢购成功！*\n\n"
+                            f"📦 服务器: `{plan_code}`\n"
+                            f"💾 内存: {mem_display}\n"
+                            f"💿 存储: {stor_display}\n"
+                            f"📍 数据中心: {dc_display}\n"
+                            f"🛒 购物车: `{result['cart_id']}`\n"
+                        )
+                        if result["order_id"]:
+                            buy_text += f"📋 订单号: `{result['order_id']}`\n"
+                        if result["payment_url"]:
+                            buy_text += f"💳 付款链接: {result['payment_url']}\n"
+                        if result.get("price"):
+                            p = result["price"]
+                            buy_text += f"💰 价格: {p.get('withTax', '?')} {p.get('currencyCode', 'EUR')}\n"
+                        buy_text += f"\n📊 下单进度: {self.orders_placed}/{self.max_orders}"
+                        buy_text += f"\n⏱️ 耗时: {result['elapsed']}s"
+                        if result["order_id"]:
+                            buy_text += "\n\n⚠️ *请尽快手动付款！*"
+                    else:
+                        buy_text = (
+                            f"❌ *自动抢购失败*\n\n"
+                            f"📦 服务器: `{plan_code}`\n"
+                            f"📍 数据中心: {dc_display}\n"
+                            f"❗ 错误: {result['error']}\n"
+                            f"⏳ {self.order_cooldown} 秒后仍有货将重试\n"
                         )
 
-                        if result["success"]:
-                            self.recently_ordered[key] = time.time()
-                            buy_text = (
-                                f"✅ *自动抢购成功！*\n\n"
-                                f"📦 服务器: `{plan_code}`\n"
-                                f"💾 内存: {mem_display}\n"
-                                f"💿 存储: {stor_display}\n"
-                                f"📍 数据中心: {dc_display}\n"
-                                f"🛒 购物车: `{result['cart_id']}`\n"
-                            )
-                            if result["order_id"]:
-                                buy_text += f"📋 订单号: `{result['order_id']}`\n"
-                            if result["payment_url"]:
-                                buy_text += f"💳 付款链接: {result['payment_url']}\n"
-                            if result.get("price"):
-                                p = result["price"]
-                                buy_text += f"💰 价格: {p.get('withTax', '?')} {p.get('currencyCode', 'EUR')}\n"
-                            buy_text += f"\n⏱️ 耗时: {result['elapsed']}s"
-                            if result["order_id"]:
-                                buy_text += "\n\n⚠️ *请尽快手动付款！*"
-                        else:
-                            buy_text = (
-                                f"❌ *自动抢购失败*\n\n"
-                                f"📦 服务器: `{plan_code}`\n"
-                                f"📍 数据中心: {dc_display}\n"
-                                f"❗ 错误: {result['error']}\n"
-                            )
-
-                        self.send_telegram(buy_text)
-                    else:
-                        # 不自动下单，只通知并提供按钮
-                        buttons = {
-                            "inline_keyboard": [[
-                                {"text": f"🛒 抢购 {mem_display}+{stor_display} @{dc}",
-                                 "callback_data": f"buy|{plan_code}|{dc}"}
-                            ]]
-                        }
-                        self.send_telegram(text, reply_markup=buttons)
+                    self.send_telegram(buy_text)
+                elif should_notify:
+                    # 独立 monitor.py 不接收 Telegram 回调，因此不发送无效按钮。
+                    text += f"\n💡 请在 Bot 中执行 `/buy {plan_code}` 选择配置下单。"
+                    self.send_telegram(text)
 
     def run(self):
         """启动监控循环"""
+        if not self.watch_list:
+            raise ValueError("监控列表为空，请通过参数或 [monitor].watch_list 指定 planCode")
         logger.info(f"🚀 OVH 可用性监控 v2 启动")
         logger.info(f"   监控服务器: {self.watch_list or '全部'}")
         logger.info(f"   默认数据中心: {self.default_dc or '全部'}")
         logger.info(f"   检查间隔: {self.interval}s")
         logger.info(f"   自动下单: {'是' if self.auto_buy else '否'}")
+        if self.auto_buy:
+            logger.info(f"   下单上限: {self.max_orders}")
         logger.info(f"   区域: {self.client.zone}/{self.client.subsidiary}")
 
         while True:
@@ -238,5 +258,11 @@ if __name__ == "__main__":
             cfg["monitor"] = {}
         cfg["monitor"]["watch_list"] = watch_list
 
-    monitor = AvailabilityMonitor(cfg)
-    monitor.run()
+    try:
+        monitor = AvailabilityMonitor(cfg)
+        monitor.run()
+    except KeyboardInterrupt:
+        logger.info("收到停止信号，监控已退出")
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(2)

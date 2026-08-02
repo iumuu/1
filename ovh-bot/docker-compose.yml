@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   ovh-bot:
     build: .
@@ -15,7 +13,13 @@ services:
       - OVH_ZONE=${OVH_ZONE:-IE}
       - TG_BOT_TOKEN=${TG_BOT_TOKEN}
       - TG_ALLOWED_USERS=${TG_ALLOWED_USERS}
+      - TG_ALLOW_ALL_USERS=${TG_ALLOW_ALL_USERS:-false}
       - TG_CHAT_ID=${TG_CHAT_ID}
+      - MONITOR_AUTO_BUY=${MONITOR_AUTO_BUY:-false}
+      - MONITOR_MAX_ORDERS=${MONITOR_MAX_ORDERS:-1}
+      - MONITOR_INTERVAL=${MONITOR_INTERVAL:-10}
+      - MONITOR_ORDER_COOLDOWN=${MONITOR_ORDER_COOLDOWN:-120}
+      - MONITOR_DATACENTER=${MONITOR_DATACENTER:-}
     volumes:
       # 固定持久化目录：监控任务保存在 ./data/watch_tasks.json，重建/更新容器不丢
       - ./data:/app/data

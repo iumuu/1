@@ -31,6 +31,11 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 # 北京时区 (UTC+8)
 BJT = timezone(timedelta(hours=8))
 
@@ -70,44 +75,42 @@ CONFIG_PATHS = [
 
 
 def parse_toml_simple(path: str) -> dict:
-    """简易 TOML 解析器"""
-    config = {}
-    current_section = None
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            m = re.match(r'^\[(\w+)\]$', line)
-            if m:
-                current_section = m.group(1)
-                config[current_section] = {}
-                continue
-            m = re.match(r'^(\w+)\s*=\s*(.+)$', line)
-            if m:
-                key = m.group(1)
-                val = m.group(2).strip()
-                if ' #' in val:
-                    val = val[:val.index(' #')].strip()
-                if val.startswith('"') and val.endswith('"'):
-                    val = val[1:-1]
-                elif val.isdigit():
-                    val = int(val)
-                elif val == "true":
-                    val = True
-                elif val == "false":
-                    val = False
-                elif val.startswith("["):
-                    inner = val[1:-1].strip()
-                    if inner:
-                        val = [v.strip().strip('"').strip("'") for v in inner.split(",")]
-                    else:
-                        val = []
-                if current_section:
-                    config[current_section][key] = val
-                else:
-                    config[key] = val
-    return config
+    """使用标准 TOML 解析器读取配置，避免注释、转义和数组被误解析。"""
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"配置文件格式错误: {path}: {exc}") from exc
+
+
+def _parse_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"无效的布尔值: {value}")
+
+
+def is_user_allowed(user_id: int, allowed_users: list, allow_all_users: bool = False) -> bool:
+    """默认拒绝访问；只有白名单或显式开放模式才放行。"""
+    return allow_all_users or user_id in allowed_users
+
+
+def execute_buy_batch(client, count: int, **buy_kwargs) -> list:
+    """按顺序执行 1-10 次下单，首次失败后停止，避免继续创建无效购物车。"""
+    safe_count = max(1, min(int(count), 10))
+    results = []
+    for _ in range(safe_count):
+        result = client.quick_buy(**buy_kwargs)
+        results.append(result)
+        if not result.get("success"):
+            break
+    return results
 
 
 def load_config() -> dict:
@@ -128,6 +131,11 @@ def load_config() -> dict:
         "OVH_ZONE":              ("ovh", "zone"),
         "TG_BOT_TOKEN":          ("telegram", "bot_token"),
         "TG_CHAT_ID":            ("telegram", "chat_id"),
+        "MONITOR_INTERVAL":      ("monitor", "interval"),
+        "MONITOR_AUTO_BUY":      ("monitor", "auto_buy"),
+        "MONITOR_MAX_ORDERS":    ("monitor", "max_orders"),
+        "MONITOR_ORDER_COOLDOWN":("monitor", "order_cooldown"),
+        "MONITOR_DATACENTER":    ("monitor", "datacenter"),
     }
 
     for env_key, (section, cfg_key) in env_map.items():
@@ -151,6 +159,25 @@ def load_config() -> dict:
             cfg["telegram"]["allowed_users"] = [int(u.strip()) for u in users.split(",") if u.strip()]
         elif isinstance(users, list):
             cfg["telegram"]["allowed_users"] = [int(u) for u in users]
+
+    if "telegram" not in cfg:
+        cfg["telegram"] = {}
+    allow_all_env = os.environ.get("TG_ALLOW_ALL_USERS")
+    if allow_all_env is not None:
+        cfg["telegram"]["allow_all_users"] = _parse_bool(allow_all_env)
+    else:
+        cfg["telegram"]["allow_all_users"] = _parse_bool(
+            cfg["telegram"].get("allow_all_users", False)
+        )
+
+    monitor_cfg = cfg.setdefault("monitor", {})
+    monitor_cfg["auto_buy"] = _parse_bool(monitor_cfg.get("auto_buy", False))
+    for key in ("interval", "max_orders", "order_cooldown"):
+        if key in monitor_cfg:
+            try:
+                monitor_cfg[key] = int(monitor_cfg[key])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"monitor.{key} 必须是整数") from exc
 
     # 默认值
     if "ovh" not in cfg:
@@ -254,6 +281,57 @@ def format_storage(storage: str) -> str:
     return storage
 
 
+def classify_disk_group(disk_group: dict) -> tuple[str, str, str]:
+    """返回 (类别, 显示名称, 图标)，明确区分 SSD 与 HDD。"""
+    raw_type = str(disk_group.get("diskType", "") or "").strip()
+    normalized = raw_type.lower().replace("-", "").replace("_", "")
+    if "nvme" in normalized:
+        return "ssd", "NVMe SSD", "⚡"
+    if "ssd" in normalized or "solidstate" in normalized:
+        return "ssd", "SSD", "⚡"
+    if any(marker in normalized for marker in ("hdd", "sata", "sas", "rotational")):
+        return "hdd", "HDD", "💽"
+    return "unknown", raw_type or "未知磁盘", "💾"
+
+
+def format_disk_group(disk_group: dict, default_group_id=None) -> str:
+    group_id = disk_group.get("diskGroupId")
+    disks = disk_group.get("numberOfDisks") or 0
+    size = disk_group.get("diskSize", {}) or {}
+    size_value = size.get("value", "?")
+    size_unit = size.get("unit", "")
+    _, type_label, icon = classify_disk_group(disk_group)
+    default_text = " · 默认组" if str(group_id) == str(default_group_id) else ""
+    return f"{icon} {type_label} · {disks}x{size_value}{size_unit} · group={group_id}{default_text}"
+
+
+def select_default_raid_group(disk_groups: list, default_group_id=None):
+    """选择单一 RAID0 磁盘组；绝不跨 SSD/HDD 或跨 group 组合。"""
+    eligible = [
+        group for group in disk_groups
+        if group.get("diskGroupId") is not None and int(group.get("numberOfDisks") or 0) >= 2
+    ]
+    if not eligible:
+        return None
+    for group in eligible:
+        if str(group.get("diskGroupId")) == str(default_group_id):
+            return group
+    return sorted(
+        eligible,
+        key=lambda group: (
+            0 if classify_disk_group(group)[0] == "ssd" else 1,
+            int(group.get("diskGroupId") or 0),
+        ),
+    )[0]
+
+
+def select_default_ssh_key(keys: list, configured_key: str = ""):
+    cleaned = [str(key).strip() for key in keys if str(key).strip()]
+    if configured_key and configured_key in cleaned:
+        return configured_key
+    return cleaned[0] if cleaned else None
+
+
 def format_memory(memory: str) -> str:
     """格式化内存显示"""
     if not memory or memory == "N/A":
@@ -351,6 +429,15 @@ def memory_matches(memory_raw: str, target: str) -> bool:
     tgt_norm = tgt.replace("gb", "g")
     raw_norm = raw.replace("gb", "g")
     return tgt_norm in raw_norm
+
+
+def watch_auto_buy_enabled(task: dict) -> bool:
+    """旧版任务没有 auto_buy 字段，继续保持自动下单行为。"""
+    return bool(task.get("auto_buy", True))
+
+
+def watch_mode_label(task: dict) -> str:
+    return "🚀 自动下单" if watch_auto_buy_enabled(task) else "🔔 仅通知"
 
 
 # ============================================================
@@ -940,6 +1027,10 @@ class OVHClient:
             body["customizations"] = customizations
         storage_config = []
         if raid0:
+            if disk_group_id is None:
+                raise ValueError("RAID0 必须指定单一 diskGroupId，禁止跨 SSD/HDD 组盘")
+            if raid_disks is None or int(raid_disks) < 2:
+                raise ValueError("RAID0 至少需要同一磁盘组内的 2 块磁盘")
             partitioning = {
                 "layout": [
                     {"mountPoint": "/", "fileSystem": "ext4", "raidLevel": 0, "size": 0}
@@ -1100,8 +1191,11 @@ class OVHClient:
             # 步骤 5: 结账
             if self.defaults.get("auto_checkout", True):
                 order = self.checkout(cart_id, auto_pay=False)
-                result["order_id"] = order.get("orderId")
-                result["payment_url"] = self.get_payment_url(order.get("orderId"))
+                order_id = order.get("orderId")
+                if not order_id:
+                    raise RuntimeError("OVH 结账响应缺少 orderId，订单状态未知，请检查购物车")
+                result["order_id"] = order_id
+                result["payment_url"] = self.get_payment_url(order_id)
 
             result["success"] = True
 
@@ -1364,18 +1458,23 @@ def run_bot(cfg: dict):
     tg_cfg = cfg.get("telegram", {})
     bot_token = tg_cfg.get("bot_token", "")
     allowed_users = tg_cfg.get("allowed_users", [])
+    allow_all_users = tg_cfg.get("allow_all_users", False)
     bot_app = None
 
     if not bot_token:
         logger.error("未配置 Telegram Bot Token")
         sys.exit(1)
+    if not allowed_users and not allow_all_users:
+        logger.error(
+            "未配置 TG_ALLOWED_USERS。为防止陌生人操作下单，Bot 已拒绝启动；"
+            "如确需公开访问，请显式设置 TG_ALLOW_ALL_USERS=true"
+        )
+        sys.exit(1)
 
     ovh_client = OVHClient(cfg)
 
     def check_user(user_id: int) -> bool:
-        if not allowed_users:
-            return True
-        return user_id in allowed_users
+        return is_user_allowed(user_id, allowed_users, allow_all_users)
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user(update.effective_user.id):
@@ -1420,7 +1519,8 @@ def run_bot(cfg: dict):
             "获取指定订单付款链接。\n\n"
             "🖥️ *服务器*\n"
             "/servers\n"
-            "查看服务器列表；按钮执行重装、重启。重装流程会自动识别磁盘组和 RAID0 选项。\n\n"
+            "查看服务器和可复制 IP；支持一键 Debian 12 + 默认密钥 + 单组 RAID0、"
+            "手动重装、重启和“没中”备注。\n\n"
             "/keys\n"
             "查看 OVH 账户里的预设 SSH 密钥。\n\n"
             "📦 *目录*\n"
@@ -1450,7 +1550,7 @@ def run_bot(cfg: dict):
             return
 
         msg = await update.message.reply_text(f"🔍 正在查询 `{plan_code}` 可抢配置...", parse_mode="Markdown")
-        all_configs = ovh_client.check_availability(plan_code)
+        all_configs = await asyncio.to_thread(ovh_client.check_availability, plan_code)
         if not all_configs:
             await msg.edit_text(f"❌ 未获取到 `{plan_code}` 的可用性数据", parse_mode="Markdown")
             return
@@ -1505,7 +1605,7 @@ def run_bot(cfg: dict):
             return
         msg = await update.message.reply_text(f"🔍 正在查询 `{plan_code}` 所有配置的可用性...", parse_mode="Markdown")
 
-        all_configs = ovh_client.check_availability(plan_code)
+        all_configs = await asyncio.to_thread(ovh_client.check_availability, plan_code)
         if not all_configs:
             await msg.edit_text(f"❌ 未获取到 `{plan_code}` 的可用性数据", parse_mode="Markdown")
             return
@@ -1513,7 +1613,7 @@ def run_bot(cfg: dict):
         # 获取基础价格（从 catalog）
         base_price_str = ""
         try:
-            catalog = ovh_client.get_catalog('eco')
+            catalog = await asyncio.to_thread(ovh_client.get_catalog, 'eco')
             for plan in catalog.get('plans', []):
                 if plan.get('planCode') == plan_code:
                     pricings = plan.get('pricings', [])
@@ -1541,7 +1641,9 @@ def run_bot(cfg: dict):
             await msg.edit_text(f"🔍 查询可用性中...（{len(available_configs_to_price)} 个有货配置查价格中）", parse_mode="Markdown")
             for cfg, dc, status in available_configs_to_price:
                 try:
-                    price = ovh_client.get_config_price(plan_code, dc, cfg["memory"], cfg["storage"])
+                    price = await asyncio.to_thread(
+                        ovh_client.get_config_price, plan_code, dc, cfg["memory"], cfg["storage"]
+                    )
                     if price:
                         price_cache[f"{cfg['fqn']}|{dc}"] = price
                 except Exception as e:
@@ -1592,10 +1694,11 @@ def run_bot(cfg: dict):
 
     # ---- 内置监控器 ----
     # 监控任务: {plan_code: {"dc": str|None, "storage": str|None, "memory": str|None,
-    #                         "max_orders": int, "ordered": int, "active": bool}}
+    #                         "auto_buy": bool, "max_orders": int, "ordered": int, "active": bool}}
     import os as _os
-    DATA_DIR = _os.environ.get("OVH_BOT_DATA_DIR", "/app/data")
+    DATA_DIR = _os.environ.get("OVH_BOT_DATA_DIR") or str(Path(__file__).parent / "data")
     WATCH_FILE = _os.path.join(DATA_DIR, "watch_tasks.json")
+    SERVER_NOTES_FILE = _os.path.join(DATA_DIR, "server_notes.json")
 
     def save_watch_tasks():
         """持久化监控任务到文件"""
@@ -1604,8 +1707,12 @@ def run_bot(cfg: dict):
             serializable = {}
             for pc, task in watch_tasks.items():
                 serializable[pc] = {k: v for k, v in task.items() if not k.startswith("_")}
-            with open(WATCH_FILE, "w") as f:
+            temp_file = WATCH_FILE + ".tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(serializable, f, ensure_ascii=False, indent=2)
+                f.flush()
+                _os.fsync(f.fileno())
+            _os.replace(temp_file, WATCH_FILE)
         except Exception as e:
             logger.warning(f"保存监控任务失败: {e}")
 
@@ -1613,9 +1720,12 @@ def run_bot(cfg: dict):
         """从文件加载监控任务"""
         try:
             if _os.path.exists(WATCH_FILE):
-                with open(WATCH_FILE, "r") as f:
+                with open(WATCH_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("监控任务文件的顶层必须是对象")
                 for pc, task in data.items():
+                    task.setdefault("auto_buy", True)
                     task["_last_order_time"] = {}
                     watch_tasks[pc] = task
                 if watch_tasks:
@@ -1623,13 +1733,46 @@ def run_bot(cfg: dict):
         except Exception as e:
             logger.warning(f"加载监控任务失败: {e}")
 
+    def save_server_notes():
+        """原子保存服务器备注。"""
+        try:
+            _os.makedirs(DATA_DIR, exist_ok=True)
+            temp_file = SERVER_NOTES_FILE + ".tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(server_notes, f, ensure_ascii=False, indent=2)
+                f.flush()
+                _os.fsync(f.fileno())
+            _os.replace(temp_file, SERVER_NOTES_FILE)
+        except Exception as e:
+            logger.warning(f"保存服务器备注失败: {e}")
+
+    def load_server_notes():
+        try:
+            if not _os.path.exists(SERVER_NOTES_FILE):
+                return
+            with open(SERVER_NOTES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("服务器备注文件的顶层必须是对象")
+            server_notes.update(data)
+        except Exception as e:
+            logger.warning(f"加载服务器备注失败: {e}")
+
+    def get_server_note(service_name: str) -> str:
+        value = server_notes.get(service_name)
+        if isinstance(value, dict):
+            return str(value.get("note", "") or "")
+        return str(value or "")
+
     watch_tasks = {}
     load_watch_tasks()  # 启动时恢复
+    server_notes = {}
+    load_server_notes()
     watch_running = False
     pending_actions = {}
     watch_sessions = {}
     buy_sessions = {}
-    watch_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
+    order_lock = asyncio.Lock()
 
     async def watch_monitor_loop():
         """后台监控循环"""
@@ -1639,14 +1782,16 @@ def run_bot(cfg: dict):
                 for plan_code, task in list(watch_tasks.items()):
                     if not task["active"]:
                         continue
-                    if task["ordered"] >= task["max_orders"]:
+                    auto_buy = watch_auto_buy_enabled(task)
+                    if auto_buy and task["ordered"] >= task["max_orders"]:
                         task["active"] = False
                         save_watch_tasks()
                         await _send_msg(f"🎯 `{plan_code}` 已达到下单上限 ({task['max_orders']}单)，监控自动停止", task.get("chat_id"))
                         continue
 
                     try:
-                        available = ovh_client.find_available_configs(
+                        available = await asyncio.to_thread(
+                            ovh_client.find_available_configs,
                             plan_code,
                             target_dc=task.get("dc"),
                             target_storage=task.get("storage"),
@@ -1672,8 +1817,18 @@ def run_bot(cfg: dict):
                                 if now - last_ts < cooldown_sec:
                                     continue
 
-                            stor_str = f" {task['storage']}" if task.get("storage") else ""
                             dc_display = format_dc(chosen['datacenter'])
+                            if not auto_buy:
+                                last_order_time[cooldown_key] = {"ts": now, "cooldown": 120}
+                                task["_last_order_time"] = last_order_time
+                                await _send_msg(
+                                    f"🔥 *监控发现 `{plan_code}` 有货！*\n"
+                                    f"📍 {dc_display} | {chosen['memory_display']} + {chosen['storage_display']}\n"
+                                    f"🔔 当前为仅通知模式，不会自动下单。",
+                                    task.get("chat_id")
+                                )
+                                continue
+
                             await _send_msg(
                                 f"🔥 *监控发现 `{plan_code}` 有货！*\n"
                                 f"📍 {dc_display} | {chosen['memory_display']} + {chosen['storage_display']}\n"
@@ -1682,13 +1837,15 @@ def run_bot(cfg: dict):
                             )
 
                             server_type = guess_server_type(plan_code)
-                            result = ovh_client.quick_buy(
-                                plan_code=plan_code,
-                                server_type=server_type,
-                                datacenter=chosen["datacenter"],
-                                target_storage=chosen.get("storage") or task.get("storage"),
-                                target_memory=chosen.get("memory") or task.get("memory"),
-                            )
+                            async with order_lock:
+                                result = await asyncio.to_thread(
+                                    ovh_client.quick_buy,
+                                    plan_code=plan_code,
+                                    server_type=server_type,
+                                    datacenter=chosen["datacenter"],
+                                    target_storage=chosen.get("storage") or task.get("storage"),
+                                    target_memory=chosen.get("memory") or task.get("memory"),
+                                )
 
                             if result["success"]:
                                 task["ordered"] += 1
@@ -1811,7 +1968,8 @@ def run_bot(cfg: dict):
         return status_text, estimated, False
 
     async def track_install_progress(message, service_name: str, template: str, task_id: str = "?",
-                                     ssh_key_name: str = None, raid_text: str = None, order_id: str = None):
+                                     ssh_key_name: str = None, raid_text: str = None, order_id: str = None,
+                                     ip_address: str = None):
         """后台轮询安装状态并编辑同一条消息显示进度条。"""
         start_ts = time.time()
         last_text = None
@@ -1819,12 +1977,14 @@ def run_bot(cfg: dict):
         for _ in range(120):  # 最多跟踪约 40 分钟
             try:
                 elapsed = int(time.time() - start_ts)
-                status_obj = ovh_client.get_install_status(service_name)
+                status_obj = await asyncio.to_thread(ovh_client.get_install_status, service_name)
                 status_text, percent, done = _extract_install_progress(status_obj, elapsed)
-                server_info = ovh_client.get_server_info(service_name)
+                server_info = await asyncio.to_thread(ovh_client.get_server_info, service_name)
                 current_os = str(server_info.get("os", "")) if isinstance(server_info, dict) else ""
                 template_base = template.split("_")[0]
-                task_info = ovh_client.get_server_task(service_name, task_id) if task_id and task_id != "?" else {}
+                task_info = await asyncio.to_thread(
+                    ovh_client.get_server_task, service_name, task_id
+                ) if task_id and task_id != "?" else {}
                 task_status = str(task_info.get("status", "") or task_info.get("state", "")).lower() if isinstance(task_info, dict) else ""
                 if task_status in ("done", "finished", "completed", "success"):
                     status_text = f"安装任务完成，当前系统: {current_os or '待刷新'}"
@@ -1838,24 +1998,31 @@ def run_bot(cfg: dict):
                 last_percent = percent
                 bar = _progress_bar(percent)
                 mins, secs = divmod(elapsed, 60)
+                current_ip = str(server_info.get("ip", "") or ip_address or "") if isinstance(server_info, dict) else str(ip_address or "")
                 text = (
                     f"💿 *系统安装进度*\n\n"
-                    f"🖥️ 服务器: `{service_name}`\n"
-                    f"💿 系统: `{template}`\n"
+                    + f"🖥️ 服务器: `{service_name}`\n"
+                    + (f"🌐 IP: `{current_ip}`\n" if current_ip else "")
+                    + f"💿 系统: `{template}`\n"
                     + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
                     + (f"🧩 磁盘: `{raid_text}`\n" if raid_text else "")
                     + f"📋 任务ID: `{task_id}`\n"
                     + (f"🧾 订单号: `{order_id}`\n" if order_id else "")
                     + "\n"
-                    f"`{bar}` {percent}%\n"
-                    f"📌 状态: `{status_text}`\n"
-                    f"⏱️ 耗时: {mins}分{secs}秒"
+                    + f"`{bar}` {percent}%\n"
+                    + f"📌 状态: `{status_text}`\n"
+                    + f"⏱️ 耗时: {mins}分{secs}秒"
                 )
+                reply_markup = None
                 if done:
-                    if isinstance(server_info, dict) and server_info:
+                    install_failed = (
+                        task_status in ("error", "failed", "cancelled", "canceled")
+                        or any(marker in status_text.lower() for marker in ("fail", "error", "失败"))
+                    )
+                    if install_failed:
+                        text += "\n\n❌ 安装失败，请检查 OVH 任务详情"
+                    elif isinstance(server_info, dict) and server_info:
                         info_lines = []
-                        if server_info.get("ip"):
-                            info_lines.append(f"🌐 IP: `{server_info.get('ip')}`")
                         if server_info.get("datacenter"):
                             info_lines.append(f"📍 机房: `{server_info.get('datacenter')}`")
                         if server_info.get("os"):
@@ -1870,11 +2037,27 @@ def run_bot(cfg: dict):
                             text += "\n\n✅ 安装完成"
                     else:
                         text += "\n\n✅ 安装完成"
+
+                    if not install_failed:
+                        note_action_id = f"note_{str(int(time.time() * 1000))[-8:]}"
+                        pending_actions[note_action_id] = {
+                            "type": "server_note",
+                            "service_name": service_name,
+                        }
+                        if get_server_note(service_name) == "没中":
+                            note_label = "📝 清除“没中”备注"
+                            note_callback = f"srvnote|clear|{note_action_id}"
+                        else:
+                            note_label = "📝 标记“没中”"
+                            note_callback = f"srvnote|miss|{note_action_id}"
+                        reply_markup = InlineKeyboardMarkup([[
+                            InlineKeyboardButton(note_label, callback_data=note_callback)
+                        ]])
                 else:
                     text += "\n\n⏳ Bot 会自动刷新此进度。"
 
                 if text != last_text:
-                    await message.edit_text(text, parse_mode="Markdown")
+                    await message.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
                     last_text = text
                 if done:
                     return
@@ -1903,7 +2086,7 @@ def run_bot(cfg: dict):
             return
 
         msg = await update.message.reply_text(f"🔍 正在查询 `{plan_code}` 可监控配置...", parse_mode="Markdown")
-        all_configs = ovh_client.check_availability(plan_code)
+        all_configs = await asyncio.to_thread(ovh_client.check_availability, plan_code)
         if not all_configs:
             await msg.edit_text(f"❌ 未获取到 `{plan_code}` 的可用性数据", parse_mode="Markdown")
             return
@@ -1995,6 +2178,7 @@ def run_bot(cfg: dict):
 
             text += (
                 f"{status} `{pc}`{filter_str}\n"
+                f"   模式: {watch_mode_label(task)}\n"
                 f"   进度: {task['ordered']}/{task['max_orders']} 单\n\n"
             )
 
@@ -2011,7 +2195,7 @@ def run_bot(cfg: dict):
         category = context.args[0] if context.args else "eco"
         msg = await update.message.reply_text(f"📖 正在获取 {category} 服务器目录...")
 
-        catalog = ovh_client.get_catalog(category)
+        catalog = await asyncio.to_thread(ovh_client.get_catalog, category)
         if not catalog:
             await msg.edit_text("❌ 获取目录失败")
             return
@@ -2078,7 +2262,7 @@ def run_bot(cfg: dict):
         if not context.args:
             try:
                 msg = await update.message.reply_text("⏳ 正在查询订单...")
-                orders, total = ovh_client.list_recent_orders(0, 10)
+                orders, total = await asyncio.to_thread(ovh_client.list_recent_orders, 0, 10)
                 if not orders:
                     await update.message.reply_text("📭 没有找到订单")
                     return
@@ -2116,7 +2300,7 @@ def run_bot(cfg: dict):
         try:
             msg = await update.message.reply_text(f"⏳ 正在查询订单 `{order_id}`...", parse_mode="Markdown")
 
-            detail = ovh_client.get_order_details(order_id)
+            detail = await asyncio.to_thread(ovh_client.get_order_details, order_id)
             status = detail.get("status", "unknown")
 
             lines = [f"📋 *订单* `{order_id}`\n"]
@@ -2149,58 +2333,72 @@ def run_bot(cfg: dict):
 
         msg = await update.message.reply_text("⏳ 正在获取服务器列表...")
         try:
-            servers = ovh_client.list_servers()
+            servers = await asyncio.to_thread(ovh_client.list_servers)
             if not servers:
                 await msg.edit_text("📭 没有找到独立服务器")
                 return
 
             server_items = []
             for s in servers:
-                hw = ovh_client.get_server_hardware(s["name"])
+                hw = await asyncio.to_thread(ovh_client.get_server_hardware, s["name"])
                 disk_groups = hw.get("diskGroups", []) if isinstance(hw, dict) else []
-                if not disk_groups:
-                    continue
                 default_group = hw.get("defaultDiskGroupId") if isinstance(hw, dict) else None
                 server_items.append((s, disk_groups, default_group))
-
-            if not server_items:
-                await msg.edit_text("📭 没有找到带磁盘组信息的独立服务器")
-                return
 
             lines = [f"🖥️ 独立服务器列表 ({len(server_items)} 台)\n"]
             keyboard = []
             for i, (s, disk_groups, default_group) in enumerate(server_items):
                 state_emoji = {"ok": "🟢", "error": "🔴"}.get(s.get("state", ""), "🟡")
 
-                lines.append(f"{state_emoji} {i+1}. {s['name']}")
-                lines.append(f"   📦 {s.get('commercial_range','?')}")
-                lines.append(f"   💻 {s.get('os','?')} | 📍 {s.get('datacenter','?')}")
+                lines.append(f"{state_emoji} {i+1}. `{s['name']}`")
+                lines.append(f"   📦 `{s.get('commercial_range','?')}`")
+                lines.append(f"   💻 `{s.get('os','?')}` | 📍 `{s.get('datacenter','?')}`")
                 if s.get("ip"):
-                    lines.append(f"   🌐 {s['ip']}")
+                    lines.append(f"   🌐 `{s['ip']}`")
+                note = get_server_note(s["name"])
+                if note:
+                    lines.append(f"   📝 备注: *{note}*")
                 if disk_groups:
-                    lines.append("   💽 磁盘组:")
-                    for dg in disk_groups:
-                        size = dg.get("diskSize", {})
-                        size_txt = f"{size.get('value','?')}{size.get('unit','')}"
-                        mark = " (默认)" if dg.get("diskGroupId") == default_group else ""
-                        lines.append(
-                            f"      group={dg.get('diskGroupId')} {dg.get('numberOfDisks')}x {dg.get('diskType')} {size_txt}{mark}"
-                        )
+                    lines.append("   💾 安装盘组（SSD/HDD 独立）:")
+                    ordered_groups = sorted(
+                        disk_groups,
+                        key=lambda group: (
+                            {"ssd": 0, "hdd": 1, "unknown": 2}[classify_disk_group(group)[0]],
+                            int(group.get("diskGroupId") or 0),
+                        ),
+                    )
+                    for dg in ordered_groups:
+                        lines.append(f"      {format_disk_group(dg, default_group)}")
+                else:
+                    lines.append("   💾 安装盘组: OVH 未返回磁盘信息")
                 lines.append("")
 
                 action_id = f"srv{i+1}_{str(int(time.time() * 1000))[-6:]}"
                 pending_actions[action_id] = {
                     "type": "server", "service_name": s["name"], "index": i+1,
-                    "disk_groups": disk_groups, "default_group": default_group
+                    "ip": s.get("ip", ""),
+                    "disk_groups": disk_groups, "default_group": default_group,
                 }
+                if select_default_raid_group(disk_groups, default_group):
+                    keyboard.append([InlineKeyboardButton(
+                        f"⚡ 一键安装 {i+1}", callback_data=f"srv|quick|{action_id}"
+                    )])
                 keyboard.append([
                     InlineKeyboardButton(f"💿 安装 {i+1}", callback_data=f"srv|install|{action_id}"),
                     InlineKeyboardButton(f"🔄 重启 {i+1}", callback_data=f"srv|reboot|{action_id}"),
                 ])
+                if note:
+                    keyboard.append([InlineKeyboardButton(
+                        f"📝 清除 {i+1} 的“没中”", callback_data=f"srvnote|clear|{action_id}"
+                    )])
 
             lines.append("💡 点按钮即可安装系统或重启服务器")
             keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
-            await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+            await msg.edit_text(
+                "\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
         except Exception as e:
             await msg.edit_text(f"❌ 获取失败: {e}")
 
@@ -2209,7 +2407,7 @@ def run_bot(cfg: dict):
         if not check_user(update.effective_user.id):
             return
         try:
-            keys = ovh_client.list_ssh_keys()
+            keys = await asyncio.to_thread(ovh_client.list_ssh_keys)
             if not keys:
                 await update.message.reply_text("📭 OVH 账号里没有预设 SSH 密钥")
                 return
@@ -2236,7 +2434,7 @@ def run_bot(cfg: dict):
             )
             return
 
-        servers = ovh_client.list_servers()
+        servers = await asyncio.to_thread(ovh_client.list_servers)
         if not servers:
             await update.message.reply_text("❌ 没有服务器")
             return
@@ -2262,7 +2460,7 @@ def run_bot(cfg: dict):
         # 只有序号 → 列出可用系统
         if len(context.args) == 1:
             msg = await update.message.reply_text(f"⏳ 正在获取可用系统列表...")
-            templates = ovh_client.get_server_templates(service_name)
+            templates = await asyncio.to_thread(ovh_client.get_server_templates, service_name)
             if not templates:
                 await msg.edit_text("❌ 获取系统列表失败")
                 return
@@ -2322,7 +2520,7 @@ def run_bot(cfg: dict):
             return
 
         if ssh_key_name:
-            keys = ovh_client.list_ssh_keys()
+            keys = await asyncio.to_thread(ovh_client.list_ssh_keys)
             if ssh_key_name not in keys:
                 await update.message.reply_text(f"❌ OVH SSH 密钥 `{ssh_key_name}` 不存在\n可用密钥: {', '.join(keys) if keys else '无'}", parse_mode="Markdown")
                 return
@@ -2339,6 +2537,7 @@ def run_bot(cfg: dict):
         pending_actions[action_id] = {
             "type": "reinstall",
             "service_name": service_name,
+            "ip": server.get("ip", ""),
             "template": template,
             "hostname": custom_hostname,
             "ssh_key_name": ssh_key_name,
@@ -2353,6 +2552,8 @@ def run_bot(cfg: dict):
         await update.message.reply_text(
             f"⚠️ *确认安装系统*\n\n"
             f"🖥️ 服务器: `{service_name}`\n"
+            + (f"🌐 IP: `{server.get('ip')}`\n" if server.get("ip") else "")
+            +
             f"📦 型号: {server.get('commercial_range','?')}\n"
             f"💾 当前系统: {server.get('os','?')}\n"
             f"💿 安装系统: `{template}`\n"
@@ -2373,7 +2574,7 @@ def run_bot(cfg: dict):
             await update.message.reply_text("用法: /reboot <序号或名称>\n先 /servers 查看列表")
             return
 
-        servers = ovh_client.list_servers()
+        servers = await asyncio.to_thread(ovh_client.list_servers)
         if not servers:
             await update.message.reply_text("❌ 没有服务器")
             return
@@ -2430,7 +2631,7 @@ def run_bot(cfg: dict):
             dc = parts[3]
             target_storage = parts[4] if len(parts) > 4 else None
             session_id = str(int(time.time() * 1000))[-10:]
-            all_configs = ovh_client.check_availability(plan_code)
+            all_configs = await asyncio.to_thread(ovh_client.check_availability, plan_code)
             buy_sessions[session_id] = {
                 "plan_code": plan_code,
                 "all_configs": all_configs,
@@ -2465,7 +2666,7 @@ def run_bot(cfg: dict):
             # 订单翻页
             page = int(parts[2])
             offset = page * 10
-            orders, total = ovh_client.list_recent_orders(offset, 10)
+            orders, total = await asyncio.to_thread(ovh_client.list_recent_orders, offset, 10)
 
             STATUS_MAP = {
                 "delivered": ("✅", "Complete"),
@@ -2502,6 +2703,39 @@ def run_bot(cfg: dict):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
+        elif parts[0] == "srvnote" and len(parts) >= 3:
+            note_op = parts[1]
+            action_id = parts[2]
+            action = pending_actions.get(action_id)
+            if not action or not action.get("service_name"):
+                await query.message.reply_text("❌ 备注操作已过期，请重新 /servers")
+                return
+            service_name = action["service_name"]
+            if note_op == "miss":
+                server_notes[service_name] = {
+                    "note": "没中",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                save_server_notes()
+                result_text = f"📝 已为 `{service_name}` 标记：*没中*"
+                next_label = "📝 清除“没中”备注"
+                next_callback = f"srvnote|clear|{action_id}"
+            elif note_op == "clear":
+                server_notes.pop(service_name, None)
+                save_server_notes()
+                result_text = f"✅ 已清除 `{service_name}` 的“没中”备注"
+                next_label = "📝 标记“没中”"
+                next_callback = f"srvnote|miss|{action_id}"
+            else:
+                return
+
+            if action.get("type") == "server_note":
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(next_label, callback_data=next_callback)
+                ]]))
+            else:
+                await query.message.reply_text(result_text, parse_mode="Markdown")
+
         elif parts[0] == "srv" and len(parts) >= 3:
             op = parts[1]
             action_id = parts[2]
@@ -2511,8 +2745,90 @@ def run_bot(cfg: dict):
                 return
             service_name = action["service_name"]
 
-            if op == "install":
-                templates = ovh_client.get_server_templates(service_name)
+            if op == "quick":
+                templates, keys = await asyncio.gather(
+                    asyncio.to_thread(ovh_client.get_server_templates, service_name),
+                    asyncio.to_thread(ovh_client.list_ssh_keys),
+                )
+                default_template = cfg.get("defaults", {}).get("reinstall_os", "debian12_64")
+                if default_template not in templates:
+                    await query.edit_message_text(
+                        f"❌ 一键安装不可用\n\n服务器: `{service_name}`\n"
+                        f"OVH 未提供默认模板 `{default_template}`，请返回手动选择系统。",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("💿 手动安装", callback_data=f"srv|install|{action_id}"),
+                            InlineKeyboardButton("取消", callback_data="cancel"),
+                        ]]),
+                    )
+                    return
+
+                configured_key = cfg.get("defaults", {}).get("ssh_key", "")
+                default_key = select_default_ssh_key(keys, configured_key)
+                if not default_key:
+                    await query.edit_message_text(
+                        f"❌ 一键安装不可用\n\n服务器: `{service_name}`\n"
+                        "账号没有 OVH SSH 密钥。请先添加密钥，或使用手动安装选择不使用密钥。",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("💿 手动安装", callback_data=f"srv|install|{action_id}"),
+                            InlineKeyboardButton("取消", callback_data="cancel"),
+                        ]]),
+                    )
+                    return
+
+                raid_group = select_default_raid_group(
+                    action.get("disk_groups", []), action.get("default_group")
+                )
+                if not raid_group:
+                    await query.edit_message_text(
+                        f"❌ 一键安装不可用\n\n服务器: `{service_name}`\n"
+                        "没有包含至少 2 块同类型磁盘的独立磁盘组，无法安全创建 RAID0。",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("💿 手动安装", callback_data=f"srv|install|{action_id}"),
+                            InlineKeyboardButton("取消", callback_data="cancel"),
+                        ]]),
+                    )
+                    return
+
+                group_id = raid_group["diskGroupId"]
+                raid_disks = int(raid_group.get("numberOfDisks") or 0)
+                raid_text = f"{format_disk_group(raid_group, action.get('default_group'))} · RAID0"
+                confirm_id = str(int(time.time() * 1000))[-10:]
+                pending_actions[confirm_id] = {
+                    "type": "reinstall",
+                    "service_name": service_name,
+                    "ip": action.get("ip", ""),
+                    "template": default_template,
+                    "hostname": None,
+                    "ssh_key_name": default_key,
+                    "raid0": True,
+                    "raid_disks": raid_disks,
+                    "disk_group_id": group_id,
+                    "data_raid0": False,
+                    "data_disk_group_id": None,
+                    "data_raid_disks": None,
+                    "raid_text": raid_text,
+                }
+                await query.edit_message_text(
+                    f"⚡ *一键安装预设*\n\n"
+                    + f"🖥️ 服务器: `{service_name}`\n"
+                    + (f"🌐 IP: `{action.get('ip')}`\n" if action.get("ip") else "")
+                    + f"💿 系统: `{default_template}`\n"
+                    + f"🔑 SSH 密钥: `{default_key}`\n"
+                    + f"🧩 安装盘: `{raid_text}`\n\n"
+                    + f"SSD 与 HDD 不会混组；本次只使用 group={group_id}。\n"
+                    + f"🚨 确认后该组所有数据将被清除！",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⚠️ 确认一键安装", callback_data=f"act|{confirm_id}")],
+                        [InlineKeyboardButton("⬅️ 手动选择", callback_data=f"srv|install|{action_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                    ]),
+                )
+
+            elif op == "install":
+                templates = await asyncio.to_thread(ovh_client.get_server_templates, service_name)
                 preferred = [
                     "debian12_64", "debian13_64",
                     "ubuntu2404-server_64", "ubuntu2204-server_64",
@@ -2523,51 +2839,86 @@ def run_bot(cfg: dict):
                 if not available:
                     available = templates[:8]
                 keyboard = []
+                quick_template = cfg.get("defaults", {}).get("reinstall_os", "debian12_64")
+                if (
+                    quick_template in templates
+                    and select_default_raid_group(action.get("disk_groups", []), action.get("default_group"))
+                ):
+                    keyboard.append([InlineKeyboardButton(
+                        "⚡ 一键 Debian 12 + 默认密钥 + RAID0",
+                        callback_data=f"srv|quick|{action_id}",
+                    )])
+                template_labels = {
+                    "debian12_64": "Debian 12 (默认)",
+                    "debian13_64": "Debian 13",
+                    "ubuntu2404-server_64": "Ubuntu 24.04 LTS",
+                    "ubuntu2204-server_64": "Ubuntu 22.04 LTS",
+                }
                 for t in available:
-                    keyboard.append([InlineKeyboardButton(t, callback_data=f"srv|os|{action_id}|{t}")])
+                    keyboard.append([InlineKeyboardButton(
+                        template_labels.get(t, t), callback_data=f"srv|os|{action_id}|{t}"
+                    )])
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
-                    f"💿 选择要安装的系统\n\n服务器: {service_name}",
+                    f"💿 *选择要安装的系统*\n\n服务器: `{service_name}`"
+                    + (f"\nIP: `{action.get('ip')}`" if action.get("ip") else ""),
+                    parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
             elif op == "os" and len(parts) >= 4:
                 action["template"] = parts[3]
-                keys = ovh_client.list_ssh_keys()
+                keys = await asyncio.to_thread(ovh_client.list_ssh_keys)
+                configured_key = cfg.get("defaults", {}).get("ssh_key", "")
+                default_key = select_default_ssh_key(keys, configured_key)
+                ordered_keys = ([default_key] if default_key else []) + [key for key in keys if key != default_key]
                 keyboard = []
-                for k in keys[:8]:
-                    keyboard.append([InlineKeyboardButton(f"🔑 {k}", callback_data=f"srv|key|{action_id}|{k}")])
+                for k in ordered_keys[:8]:
+                    suffix = " (默认)" if k == default_key else ""
+                    keyboard.append([InlineKeyboardButton(f"🔑 {k}{suffix}", callback_data=f"srv|key|{action_id}|{k}")])
                 keyboard.append([InlineKeyboardButton("不使用 SSH key", callback_data=f"srv|key|{action_id}|none")])
                 keyboard.append([
                     InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"srv|install|{action_id}"),
                     InlineKeyboardButton("取消", callback_data="cancel")
                 ])
                 await query.edit_message_text(
-                    f"🔑 选择 SSH 密钥\n\n服务器: {service_name}\n系统: {action['template']}",
+                    f"🔑 *选择 SSH 密钥*\n\n服务器: `{service_name}`\n系统: `{action['template']}`\n"
+                    f"默认使用: `{default_key or '无可用密钥'}`",
+                    parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
             elif op == "key" and len(parts) >= 4:
                 action["ssh_key_name"] = None if parts[3] == "none" else parts[3]
                 keyboard = []
-                for dg in action.get("disk_groups", []):
+                disk_groups = sorted(
+                    action.get("disk_groups", []),
+                    key=lambda group: (
+                        {"ssd": 0, "hdd": 1, "unknown": 2}[classify_disk_group(group)[0]],
+                        int(group.get("diskGroupId") or 0),
+                    ),
+                )
+                default_raid_group = select_default_raid_group(
+                    disk_groups, action.get("default_group")
+                )
+                for dg in disk_groups:
                     group_id = dg.get("diskGroupId")
                     disks = dg.get("numberOfDisks") or 0
                     if group_id is None:
                         continue
                     size = dg.get("diskSize", {})
                     size_txt = f"{size.get('value','?')}{size.get('unit','')}"
-                    disk_type = dg.get("diskType", "DISK")
-                    is_nvme = "nvme" in str(disk_type).lower()
-                    if is_nvme:
-                        sys_label = f"✅ NVMe系统盘 不组RAID (group={group_id})"
-                    else:
-                        sys_label = f"✅ HDD系统盘 不组RAID (group={group_id})"
-                    keyboard.append([InlineKeyboardButton(sys_label, callback_data=f"srv|raid|{action_id}|sysauto{group_id}")])
+                    _, disk_label, disk_icon = classify_disk_group(dg)
                     if disks >= 2:
-                        raid_name = "NVMe系统盘 RAID0" if is_nvme else "HDD系统盘 RAID0"
-                        label = f"⚠️ {raid_name} (group={group_id})"
-                        keyboard.append([InlineKeyboardButton(label, callback_data=f"srv|raid|{action_id}|g{group_id}d{disks}")])
+                        recommended = " · 默认" if dg is default_raid_group else ""
+                        keyboard.append([InlineKeyboardButton(
+                            f"{disk_icon} {disk_label} {disks}x{size_txt} · RAID0{recommended}",
+                            callback_data=f"srv|raid|{action_id}|g{group_id}d{disks}",
+                        )])
+                    keyboard.append([InlineKeyboardButton(
+                        f"↳ {disk_label} {disks}x{size_txt} · 不做 RAID0",
+                        callback_data=f"srv|raid|{action_id}|sys{group_id}",
+                    )])
 
                 # OVH reinstall API 不支持一次安装同时自定义多个磁盘组。
                 # 混合盘机器只能先选择 NVMe 系统盘，HDD 数据盘 RAID0 需系统安装完成后进 SSH 手动创建。
@@ -2577,8 +2928,17 @@ def run_bot(cfg: dict):
                     InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"srv|os|{action_id}|{action['template']}"),
                     InlineKeyboardButton("取消", callback_data="cancel")
                 ])
+                inventory = "\n".join(
+                    f"• {format_disk_group(group, action.get('default_group'))}"
+                    for group in disk_groups
+                ) or "• OVH 未返回磁盘组"
                 await query.edit_message_text(
-                    f"🧩 选择系统安装磁盘\n\n服务器: {service_name}\n系统: {action['template']}\nSSH key: {action.get('ssh_key_name') or '不使用'}",
+                    f"🧩 *选择系统安装盘*\n\n"
+                    f"服务器: `{service_name}`\n系统: `{action['template']}`\n"
+                    f"SSH key: `{action.get('ssh_key_name') or '不使用'}`\n\n"
+                    f"*磁盘组清单*\n{inventory}\n\n"
+                    f"每个选项只使用一个 group，SSD 与 HDD 不会混组。",
+                    parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
@@ -2590,26 +2950,10 @@ def run_bot(cfg: dict):
                     except ValueError:
                         await query.edit_message_text("❌ 磁盘方案参数无效，请重新 /servers")
                         return
-                    dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == group_id), None)
-                    disk_type = dg.get("diskType", "DISK") if dg else "DISK"
-                    disks = dg.get("numberOfDisks") if dg else "?"
-                    size = dg.get("diskSize", {}) if dg else {}
-                    size_txt = f"{size.get('value','?')}{size.get('unit','')}"
-                    action["raid0"] = False
-                    action["disk_group_id"] = None
-                    action["raid_disks"] = None
-                    action["data_raid0"] = False
-                    action["data_disk_group_id"] = None
-                    action["data_raid_disks"] = None
-                    raid_text = f"不组 RAID / OVH默认安装 (参考 group={group_id} {disks}x {disk_type} {size_txt})"
-                elif mode.startswith("sys"):
-                    try:
-                        group_id = int(mode[3:])
-                    except ValueError:
-                        await query.edit_message_text("❌ 磁盘方案参数无效，请重新 /servers")
+                    dg = next((x for x in action.get("disk_groups", []) if str(x.get("diskGroupId")) == str(group_id)), None)
+                    if not dg:
+                        await query.edit_message_text("❌ 磁盘组不存在，请重新 /servers")
                         return
-                    dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == group_id), None)
-                    disk_type = dg.get("diskType", "DISK") if dg else "DISK"
                     disks = dg.get("numberOfDisks") if dg else "?"
                     size = dg.get("diskSize", {}) if dg else {}
                     size_txt = f"{size.get('value','?')}{size.get('unit','')}"
@@ -2619,7 +2963,29 @@ def run_bot(cfg: dict):
                     action["data_raid0"] = False
                     action["data_disk_group_id"] = None
                     action["data_raid_disks"] = None
-                    raid_text = f"系统盘 group={group_id} {disks}x {disk_type} {size_txt} / 无 RAID0"
+                    _, disk_label, _ = classify_disk_group(dg or {})
+                    raid_text = f"{disk_label} group={group_id} {disks}x{size_txt} / 不做 RAID0"
+                elif mode.startswith("sys"):
+                    try:
+                        group_id = int(mode[3:])
+                    except ValueError:
+                        await query.edit_message_text("❌ 磁盘方案参数无效，请重新 /servers")
+                        return
+                    dg = next((x for x in action.get("disk_groups", []) if str(x.get("diskGroupId")) == str(group_id)), None)
+                    if not dg:
+                        await query.edit_message_text("❌ 磁盘组不存在，请重新 /servers")
+                        return
+                    disks = dg.get("numberOfDisks") if dg else "?"
+                    size = dg.get("diskSize", {}) if dg else {}
+                    size_txt = f"{size.get('value','?')}{size.get('unit','')}"
+                    action["raid0"] = False
+                    action["disk_group_id"] = group_id
+                    action["raid_disks"] = None
+                    action["data_raid0"] = False
+                    action["data_disk_group_id"] = None
+                    action["data_raid_disks"] = None
+                    _, disk_label, _ = classify_disk_group(dg or {})
+                    raid_text = f"{disk_label} group={group_id} {disks}x{size_txt} / 不做 RAID0"
                 elif mode.startswith("g") and "d" in mode:
                     try:
                         group_part, disk_part = mode[1:].split("d", 1)
@@ -2628,8 +2994,14 @@ def run_bot(cfg: dict):
                     except ValueError:
                         await query.edit_message_text("❌ 磁盘方案参数无效，请重新 /servers")
                         return
-                    dg = next((x for x in action.get("disk_groups", []) if x.get("diskGroupId") == group_id), None)
-                    disk_type = dg.get("diskType", "DISK") if dg else "DISK"
+                    dg = next((x for x in action.get("disk_groups", []) if str(x.get("diskGroupId")) == str(group_id)), None)
+                    if not dg:
+                        await query.edit_message_text("❌ 磁盘组不存在，请重新 /servers")
+                        return
+                    actual_disks = int(dg.get("numberOfDisks") or 0)
+                    if actual_disks < 2 or actual_disks != disks:
+                        await query.edit_message_text("❌ RAID0 磁盘数量与 OVH 规格不一致，请重新 /servers")
+                        return
                     size = dg.get("diskSize", {}) if dg else {}
                     size_txt = f"{size.get('value','?')}{size.get('unit','')}"
                     action["raid0"] = True
@@ -2638,7 +3010,8 @@ def run_bot(cfg: dict):
                     action["data_raid0"] = False
                     action["data_disk_group_id"] = None
                     action["data_raid_disks"] = None
-                    raid_text = f"RAID0 group={group_id} {disks}x {disk_type} {size_txt}"
+                    _, disk_label, _ = classify_disk_group(dg)
+                    raid_text = f"{disk_label} group={group_id} {disks}x{size_txt} / RAID0"
                 else:
                     action["raid0"] = False
                     action["disk_group_id"] = None
@@ -2652,6 +3025,7 @@ def run_bot(cfg: dict):
                 pending_actions[confirm_id] = {
                     "type": "reinstall",
                     "service_name": service_name,
+                    "ip": action.get("ip", ""),
                     "template": action["template"],
                     "hostname": None,
                     "ssh_key_name": action.get("ssh_key_name"),
@@ -2661,6 +3035,7 @@ def run_bot(cfg: dict):
                     "data_raid0": action.get("data_raid0", False),
                     "data_disk_group_id": action.get("data_disk_group_id"),
                     "data_raid_disks": action.get("data_raid_disks"),
+                    "raid_text": raid_text,
                 }
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("⚠️ 确认安装", callback_data=f"act|{confirm_id}")],
@@ -2668,11 +3043,13 @@ def run_bot(cfg: dict):
                 ])
                 await query.edit_message_text(
                     f"⚠️ 确认安装系统\n\n"
-                    f"服务器: {service_name}\n"
-                    f"系统: {action['template']}\n"
-                    f"SSH key: {action.get('ssh_key_name') or '不使用'}\n"
-                    f"磁盘: {raid_text}\n\n"
-                    f"🚨 所有数据将被清除！",
+                    + f"服务器: `{service_name}`\n"
+                    + (f"IP: `{action.get('ip')}`\n" if action.get("ip") else "")
+                    + f"系统: `{action['template']}`\n"
+                    + f"SSH key: `{action.get('ssh_key_name') or '不使用'}`\n"
+                    + f"磁盘: `{raid_text}`\n\n"
+                    + f"🚨 所有数据将被清除！",
+                    parse_mode="Markdown",
                     reply_markup=keyboard
                 )
 
@@ -2769,7 +3146,7 @@ def run_bot(cfg: dict):
                 keyboard = [
                     [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
                     [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
+                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10")],
                     [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ]
                 await query.edit_message_text(
@@ -2820,7 +3197,7 @@ def run_bot(cfg: dict):
                     keyboard = [
                         [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
                         [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                        [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
+                        [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10")],
                         [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
                     ]
                     await query.edit_message_text(
@@ -2864,7 +3241,7 @@ def run_bot(cfg: dict):
                 keyboard = [
                     [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
                     [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10"), InlineKeyboardButton("自定义", callback_data=f"watch|count|{session_id}|custom")],
+                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10")],
                     [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|exnext|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ]
                 await query.edit_message_text(
@@ -2875,12 +3252,36 @@ def run_bot(cfg: dict):
 
             elif stage == "count" and len(parts) >= 4:
                 val = parts[3]
-                session["max_orders"] = 1 if val == "custom" else int(val)
+                session["max_orders"] = int(val)
                 cfg = session.get("selected_cfg")
                 dc = session.get("selected_dc")
                 if not cfg:
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
+                dc_display = "全部机房" if dc is None else format_dc(dc)
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚀 自动下单（默认）", callback_data=f"watch|mode|{session_id}|auto")],
+                    [InlineKeyboardButton("🔔 仅通知", callback_data=f"watch|mode|{session_id}|notify")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|countback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ])
+                await query.edit_message_text(
+                    f"⚙️ 选择监控模式\n\n"
+                    f"型号: `{plan_code}`\n"
+                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"机房: {dc_display}\n"
+                    f"下单上限: {session.get('max_orders', 1)}",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+
+            elif stage == "mode" and len(parts) >= 4:
+                cfg = session.get("selected_cfg")
+                dc = session.get("selected_dc")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    return
+                auto_buy = parts[3] != "notify"
+                session["auto_buy"] = auto_buy
                 dc_display = "全部机房" if dc is None else format_dc(dc)
                 confirm_id = str(int(time.time() * 1000))[-10:]
                 pending_actions[confirm_id] = {
@@ -2892,6 +3293,7 @@ def run_bot(cfg: dict):
                     "storage": cfg.get("storage"),
                     "memory": cfg.get("memory"),
                     "max_orders": session.get("max_orders", 1),
+                    "auto_buy": auto_buy,
                 }
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("▶️ 确认开始监控", callback_data=f"act|{confirm_id}")],
@@ -2902,9 +3304,31 @@ def run_bot(cfg: dict):
                     f"型号: `{plan_code}`\n"
                     f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
                     f"机房: {dc_display}\n"
+                    f"模式: {watch_mode_label({'auto_buy': auto_buy})}\n"
                     f"下单上限: {session.get('max_orders', 1)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
+                )
+
+            elif stage == "countback":
+                cfg = session.get("selected_cfg")
+                if not cfg:
+                    await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
+                    return
+                dc = session.get("selected_dc")
+                dc_display = "全部机房" if dc is None else format_dc(dc)
+                keyboard = [
+                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
+                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
+                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10")],
+                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ]
+                await query.edit_message_text(
+                    f"🎯 选择下单数量\n\n型号: `{plan_code}`\n"
+                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"机房: {dc_display}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
                 )
 
         elif parts[0] == "watchlist":
@@ -2948,14 +3372,20 @@ def run_bot(cfg: dict):
                     "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
                     callback_data=f"watchlist|toggle|{plan_code}"
                 )
+                mode_btn = InlineKeyboardButton(
+                    "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
+                    callback_data=f"watchlist|mode|{plan_code}"
+                )
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
+                    [mode_btn],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
                 await query.edit_message_text(
                     f"⚙️ 管理监控任务\n\n"
                     f"{status} `{plan_code}`\n"
+                    f"模式: {watch_mode_label(task)}\n"
                     f"条件: {', '.join(filter_parts)}\n"
                     f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
                     parse_mode="Markdown",
@@ -2972,7 +3402,11 @@ def run_bot(cfg: dict):
                 was_active = task.get("active", True)
                 task["active"] = not was_active
                 task["chat_id"] = str(query.message.chat_id)
-                if task["active"] and task.get("ordered", 0) >= task.get("max_orders", 1):
+                if (
+                    task["active"]
+                    and watch_auto_buy_enabled(task)
+                    and task.get("ordered", 0) >= task.get("max_orders", 1)
+                ):
                     task["ordered"] = 0
                     task["_last_order_time"] = {}
                 save_watch_tasks()
@@ -2997,14 +3431,68 @@ def run_bot(cfg: dict):
                     "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
                     callback_data=f"watchlist|toggle|{plan_code}"
                 )
+                mode_btn = InlineKeyboardButton(
+                    "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
+                    callback_data=f"watchlist|mode|{plan_code}"
+                )
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
+                    [mode_btn],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
                 await query.edit_message_text(
                     f"⚙️ 管理监控任务\n\n"
                     f"{status} `{plan_code}`\n"
+                    f"模式: {watch_mode_label(task)}\n"
+                    f"条件: {', '.join(filter_parts)}\n"
+                    f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+                return
+
+            if len(parts) >= 3 and parts[1] == "mode":
+                plan_code = parts[2]
+                task = watch_tasks.get(plan_code)
+                if not task:
+                    await query.edit_message_text("❌ 监控任务不存在或已删除")
+                    return
+                task["auto_buy"] = not watch_auto_buy_enabled(task)
+                task["chat_id"] = str(query.message.chat_id)
+                if task["auto_buy"] and task.get("ordered", 0) >= task.get("max_orders", 1):
+                    task["ordered"] = 0
+                task["_last_order_time"] = {}
+                save_watch_tasks()
+                await query.answer(f"{plan_code} 已切换为{'自动下单' if task['auto_buy'] else '仅通知'}")
+                status = "🟢 监控中" if task.get("active") else "🔴 已暂停"
+                filter_parts = []
+                if task.get("dc"):
+                    filter_parts.append(f"机房={format_dc(task['dc'])}")
+                else:
+                    filter_parts.append("机房=全部机房")
+                if task.get("storage"):
+                    filter_parts.append(f"存储={format_storage(task['storage'])}")
+                if task.get("memory"):
+                    filter_parts.append(f"内存={format_memory(task['memory'])}")
+                action_btn = InlineKeyboardButton(
+                    "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
+                    callback_data=f"watchlist|toggle|{plan_code}"
+                )
+                mode_btn = InlineKeyboardButton(
+                    "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
+                    callback_data=f"watchlist|mode|{plan_code}"
+                )
+                keyboard = InlineKeyboardMarkup([
+                    [action_btn],
+                    [mode_btn],
+                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
+                    [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ])
+                await query.edit_message_text(
+                    f"⚙️ 管理监控任务\n\n"
+                    f"{status} `{plan_code}`\n"
+                    f"模式: {watch_mode_label(task)}\n"
                     f"条件: {', '.join(filter_parts)}\n"
                     f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
                     parse_mode="Markdown",
@@ -3203,19 +3691,25 @@ def run_bot(cfg: dict):
                 return
 
             if action["type"] == "buy_start":
+                # 原子领取确认动作，防止 Telegram 重复回调造成重复下单。
+                claimed_action = pending_actions.pop(action_id, None)
+                if claimed_action is None:
+                    await query.edit_message_text("❌ 该抢购操作已在执行，请勿重复点击")
+                    return
+                action = claimed_action
                 plan_code = action["plan_code"]
                 server_type = guess_server_type(plan_code)
                 dc = action.get("dc")
 
                 # 先检查有没有货，没货就不浪费时间调用下单 API
-                available = ovh_client.find_available_configs(
+                available = await asyncio.to_thread(
+                    ovh_client.find_available_configs,
                     plan_code,
                     target_dc=dc,
                     target_storage=action.get("storage"),
                     target_memory=action.get("memory"),
                 )
                 if not available:
-                    pending_actions.pop(action_id, None)
                     dc_display = format_dc(dc) if dc else "全部机房"
                     cfg_mem = format_memory(action.get("memory", ""))
                     cfg_stor = format_storage(action.get("storage", ""))
@@ -3231,18 +3725,29 @@ def run_bot(cfg: dict):
 
                 dc_display = format_dc(dc) if dc else available[0]["datacenter"]
                 await query.edit_message_text(f"🚀 正在抢购 `{plan_code}` @ {dc_display}...")
-                result = ovh_client.quick_buy(
-                    plan_code=plan_code,
-                    server_type=server_type,
-                    datacenter=dc,
-                    target_storage=action.get("storage"),
-                    target_memory=action.get("memory"),
-                )
-                text = _format_buy_result(result)
-                if result.get("success"):
-                    pending_actions.pop(action_id, None)
-                if action.get("count", 1) > 1 and result.get("success"):
-                    text += f"\n\n📊 已按按钮下单数: {action['count']}"
+                requested_count = max(1, min(int(action.get("count", 1)), 10))
+                async with order_lock:
+                    results = await asyncio.to_thread(
+                        execute_buy_batch,
+                        ovh_client,
+                        requested_count,
+                        plan_code=plan_code,
+                        server_type=server_type,
+                        datacenter=dc,
+                        target_storage=action.get("storage"),
+                        target_memory=action.get("memory"),
+                    )
+
+                if requested_count == 1:
+                    text = _format_buy_result(results[0])
+                else:
+                    sections = [
+                        f"*第 {index}/{requested_count} 单*\n{_format_buy_result(result)}"
+                        for index, result in enumerate(results, 1)
+                    ]
+                    succeeded = sum(bool(result.get("success")) for result in results)
+                    text = "\n\n".join(sections)
+                    text += f"\n\n📊 实际成功: {succeeded}/{requested_count} 单"
                 await query.edit_message_text(text, parse_mode="Markdown")
 
             elif action["type"] == "watch_start":
@@ -3253,6 +3758,7 @@ def run_bot(cfg: dict):
                         "excluded_dcs": action.get("excluded_dcs", []),
                         "storage": action.get("storage"),
                         "memory": action.get("memory"),
+                        "auto_buy": action.get("auto_buy", True),
                         "max_orders": action.get("max_orders", 1),
                         "ordered": 0,
                         "active": True,
@@ -3268,9 +3774,10 @@ def run_bot(cfg: dict):
                         f"📡 *开始监控* `{plan_code}`\n\n"
                         f"📍 机房: {format_dc(action.get('dc')) if action.get('dc') else '全部机房'}\n"
                         f"📦 配置: {format_memory(action.get('memory'))} + {format_storage(action.get('storage'))}\n"
+                        f"⚙️ 模式: {watch_mode_label(action)}\n"
                         f"🎯 下单上限: {action.get('max_orders', 1)}\n"
                         f"📊 已下: 0 单\n\n"
-                        f"💡 达到上限后自动停止",
+                        + (f"💡 达到上限后自动停止" if action.get("auto_buy", True) else f"💡 仅发送有货通知，不会自动下单"),
                         parse_mode="Markdown"
                     )
                 except Exception as e:
@@ -3281,7 +3788,13 @@ def run_bot(cfg: dict):
                     )
 
             elif action["type"] == "reinstall":
+                claimed_action = pending_actions.pop(action_id, None)
+                if claimed_action is None:
+                    await query.edit_message_text("❌ 安装操作已在执行，请勿重复点击")
+                    return
+                action = claimed_action
                 service_name = action["service_name"]
+                ip_address = action.get("ip", "")
                 template = action["template"]
                 hostname = action.get("hostname")
                 ssh_key_name = action.get("ssh_key_name")
@@ -3293,51 +3806,64 @@ def run_bot(cfg: dict):
                 data_raid_disks = action.get("data_raid_disks")
                 await query.edit_message_text(f"⏳ 正在安装 `{template}` 到 `{service_name}`...")
                 try:
-                    result = ovh_client.reinstall_server(
+                    result = await asyncio.to_thread(
+                        ovh_client.reinstall_server,
                         service_name, template, hostname,
                         ssh_key_name=ssh_key_name, raid0=raid0,
                         raid_disks=raid_disks, disk_group_id=disk_group_id,
                         data_raid0=data_raid0, data_disk_group_id=data_disk_group_id,
-                        data_raid_disks=data_raid_disks
+                        data_raid_disks=data_raid_disks,
                     )
                     task_id = result.get("taskId", "?") if isinstance(result, dict) else "?"
                     order_id = (result.get("orderId") or result.get("order_id")) if isinstance(result, dict) else None
-                    pending_actions.pop(action_id, None)
-                    raid_text = None
-                    if data_raid0:
+                    raid_text = action.get("raid_text")
+                    if not raid_text and data_raid0:
                         raid_text = f"系统盘 group={disk_group_id} + /data RAID0 group={data_disk_group_id}" + (f" disks={data_raid_disks}" if data_raid_disks else "")
-                    elif raid0:
+                    elif not raid_text and raid0:
                         raid_text = f"RAID0 group={disk_group_id}" + (f" disks={raid_disks}" if raid_disks else "")
-                    elif disk_group_id is not None:
+                    elif not raid_text and disk_group_id is not None:
                         raid_text = f"系统盘 group={disk_group_id} / 无 RAID0"
-                    else:
+                    elif not raid_text:
                         raid_text = "默认分区 / 无 RAID"
                     await query.edit_message_text(
                         f"💿 *系统安装进度*\n\n"
                         f"🖥️ 服务器: `{service_name}`\n"
-                        f"💿 系统: `{template}`\n"
+                        + (f"🌐 IP: `{ip_address}`\n" if ip_address else "")
+                        + f"💿 系统: `{template}`\n"
                         + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
                         + f"🧩 磁盘: `{raid_text}`\n"
                         + f"📋 任务ID: `{task_id}`\n"
                         + (f"🧾 订单号: `{order_id}`\n" if order_id else "")
                         + "\n"
                         + f"`█░░░░░░░░░░░` 5%\n"
-                        f"📌 状态: `安装任务已提交`\n"
-                        f"⏱️ 耗时: 0分0秒\n\n"
-                        f"⏳ Bot 会自动刷新此进度。",
+                        + f"📌 状态: `安装任务已提交`\n"
+                        + f"⏱️ 耗时: 0分0秒\n\n"
+                        + f"⏳ Bot 会自动刷新此进度。",
                         parse_mode="Markdown"
                     )
                     asyncio.ensure_future(
-                        track_install_progress(query.message, service_name, template, str(task_id), ssh_key_name, raid_text, str(order_id) if order_id else None)
+                        track_install_progress(
+                            query.message, service_name, template, str(task_id),
+                            ssh_key_name, raid_text, str(order_id) if order_id else None,
+                            ip_address,
+                        )
                     )
                 except Exception as e:
-                    await query.edit_message_text(f"❌ 安装失败: {e}")
+                    pending_actions[action_id] = action
+                    await query.edit_message_text(
+                        f"❌ 安装请求失败: `{e}`\n\n可确认重试，或取消后重新 /servers。",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔄 重试安装", callback_data=f"act|{action_id}"),
+                            InlineKeyboardButton("取消", callback_data="cancel"),
+                        ]]),
+                    )
 
             elif action["type"] == "reboot":
                 service_name = action["service_name"]
                 await query.edit_message_text(f"⏳ 正在重启 `{service_name}`...")
                 try:
-                    ovh_client.reboot_server(service_name)
+                    await asyncio.to_thread(ovh_client.reboot_server, service_name)
                     pending_actions.pop(action_id, None)
                     await query.edit_message_text(
                         f"✅ 重启指令已发送\n\n🖥️ `{service_name}`\n⏳ 服务器正在重启...",
@@ -3411,12 +3937,14 @@ def run_bot(cfg: dict):
             parse_mode="Markdown",
         )
 
-        result = ovh_client.quick_buy(
-            plan_code=plan_code,
-            server_type=server_type,
-            datacenter=dc,
-            target_storage=target_storage,
-        )
+        async with order_lock:
+            result = await asyncio.to_thread(
+                ovh_client.quick_buy,
+                plan_code=plan_code,
+                server_type=server_type,
+                datacenter=dc,
+                target_storage=target_storage,
+            )
 
         reply_text = _format_buy_result(result)
         await msg.edit_text(reply_text, parse_mode="Markdown")
