@@ -1,3 +1,5 @@
+import ast
+import inspect
 import sys
 import tempfile
 import time
@@ -66,6 +68,29 @@ auto_buy = true
 
 
 class OVHCallTests(unittest.IsolatedAsyncioTestCase):
+    def test_install_callback_does_not_read_shadowed_run_config(self):
+        run_bot_tree = ast.parse(inspect.getsource(bot.run_bot))
+        callback = next(
+            node
+            for node in ast.walk(run_bot_tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_button_callback_impl"
+        )
+        shadowed_default_reads = [
+            node
+            for node in ast.walk(callback)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "cfg"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "defaults"
+        ]
+
+        self.assertEqual(shadowed_default_reads, [])
+
     async def test_blocking_ovh_call_times_out_with_readable_error(self):
         with self.assertRaisesRegex(TimeoutError, "OVH API 0.01 秒无响应"):
             await bot.run_ovh_call(time.sleep, 0.05, timeout=0.01)
