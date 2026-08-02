@@ -124,6 +124,58 @@ async def run_ovh_call(func, *args, timeout: float = 20, **kwargs):
         raise TimeoutError(f"OVH API {timeout} 秒无响应") from exc
 
 
+async def run_ovh_call_with_heartbeat(
+    func,
+    *args,
+    timeout: float = 20,
+    heartbeat: float = 5,
+    on_wait=None,
+    **kwargs,
+):
+    """执行 OVH 请求，并在等待期间定时回报已等待秒数。"""
+    task = asyncio.create_task(run_ovh_call(func, *args, timeout=timeout, **kwargs))
+    started_at = time.monotonic()
+    interval = max(0.001, float(heartbeat))
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=interval)
+        if done:
+            return await task
+        if on_wait is not None:
+            elapsed = max(1, int(time.monotonic() - started_at))
+            try:
+                await on_wait(elapsed)
+            except Exception as exc:
+                logger.warning(f"更新 OVH 请求等待进度失败: {exc}")
+
+
+async def execute_callback_safely(handler, update, context):
+    """保证按钮处理异常时 Telegram 端一定得到可见反馈。"""
+    try:
+        return await handler(update, context)
+    except Exception as exc:
+        logger.error(f"按钮回调处理失败: {exc}\n{traceback.format_exc()}")
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return None
+        try:
+            await query.answer("按钮处理失败", show_alert=True)
+        except Exception:
+            pass
+        error_text = (
+            "❌ 按钮操作失败\n\n"
+            f"错误类型: {type(exc).__name__}\n"
+            "请重新发送 /servers 后再试；详细原因已写入容器日志。"
+        )
+        try:
+            await query.edit_message_text(error_text)
+        except Exception:
+            try:
+                await query.message.reply_text(error_text)
+            except Exception as reply_exc:
+                logger.error(f"发送按钮错误提示失败: {reply_exc}")
+        return None
+
+
 def load_config() -> dict:
     """加载配置，优先级: 环境变量 > config.toml > 默认值"""
     # 按优先级查找配置文件
@@ -477,6 +529,38 @@ def reinstall_template_choices(default_template: str = "debian12_64") -> list:
         }
         for template in ordered
     ]
+
+
+def progress_bar_text(percent: int, width: int = 12) -> str:
+    """返回固定宽度进度条。"""
+    percent = max(0, min(100, int(percent)))
+    filled = round(width * percent / 100)
+    return "█" * filled + "░" * (width - filled)
+
+
+def format_quick_install_progress(
+    service_name: str,
+    ip_address: str,
+    percent: int,
+    stage: str,
+    detail: str = "",
+) -> str:
+    """生成一键安装准备阶段的可复制、可持续刷新的进度消息。"""
+    lines = [
+        "⚡ *一键安装进度*",
+        "",
+        f"🖥️ 服务器: `{service_name}`",
+    ]
+    if ip_address:
+        lines.append(f"🌐 IP: `{ip_address}`")
+    lines.extend([
+        "",
+        f"`{progress_bar_text(percent)}` {max(0, min(100, int(percent)))}%",
+        f"📌 当前步骤: `{stage}`",
+    ])
+    if detail:
+        lines.append(f"⏱️ {detail}")
+    return "\n".join(lines)
 
 
 def format_memory(memory: str) -> str:
@@ -2055,9 +2139,7 @@ def run_bot(cfg: dict):
             logger.error(f"发送监控消息失败: {e}")
 
     def _progress_bar(percent: int, width: int = 12) -> str:
-        percent = max(0, min(100, int(percent)))
-        filled = round(width * percent / 100)
-        return "█" * filled + "░" * (width - filled)
+        return progress_bar_text(percent, width)
 
     def _extract_install_progress(status_obj, elapsed_sec: int = 0):
         """从 OVH 安装状态中提取阶段和百分比。"""
@@ -2514,14 +2596,21 @@ def run_bot(cfg: dict):
 
         msg = await update.message.reply_text("⏳ 正在获取服务器列表...")
         try:
-            servers = await asyncio.to_thread(ovh_client.list_servers)
+            servers = await run_ovh_call(ovh_client.list_servers)
             if not servers:
                 await msg.edit_text("📭 没有找到独立服务器")
                 return
 
             server_items = []
             for s in servers:
-                hw = await asyncio.to_thread(ovh_client.get_server_hardware, s["name"])
+                try:
+                    hw = await run_ovh_call(
+                        ovh_client.get_server_hardware,
+                        s["name"],
+                    )
+                except TimeoutError as exc:
+                    logger.warning("/servers 跳过硬件查询超时的服务 %s: %s", s["name"], exc)
+                    continue
                 disk_groups = extract_installable_disk_groups(hw)
                 if not disk_groups:
                     logger.info("/servers 隐藏无有效磁盘组的服务: %s", s["name"])
@@ -2799,11 +2888,15 @@ def run_bot(cfg: dict):
             reply_markup=kb
         )
 
-    async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _button_callback_impl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理内联按钮回调 - 支持带存储类型的下单"""
         nonlocal watch_running
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception as exc:
+            # 回调确认过期不应阻断实际按钮操作。
+            logger.warning(f"确认 Telegram 按钮回调失败，继续处理操作: {exc}")
 
         if not check_user(query.from_user.id):
             await query.answer("⛔ 未授权", show_alert=True)
@@ -2971,7 +3064,13 @@ def run_bot(cfg: dict):
 
             elif op == "quick":
                 await query.edit_message_text(
-                    f"⏳ 正在准备一键安装...\n\n服务器: `{service_name}`",
+                    format_quick_install_progress(
+                        service_name,
+                        action.get("ip", ""),
+                        10,
+                        "读取默认安装设置",
+                        "步骤 1/4 · 本地配置，通常立即完成",
+                    ),
                     parse_mode="Markdown",
                 )
                 default_template = cfg.get("defaults", {}).get("reinstall_os", "debian12_64")
@@ -2979,8 +3078,36 @@ def run_bot(cfg: dict):
                 if configured_key:
                     default_key = configured_key
                 else:
+                    await query.edit_message_text(
+                        format_quick_install_progress(
+                            service_name,
+                            action.get("ip", ""),
+                            30,
+                            "读取 OVH SSH 密钥",
+                            "步骤 2/4 · 最长等待 20 秒",
+                        ),
+                        parse_mode="Markdown",
+                    )
+
+                    async def update_key_wait(elapsed: int):
+                        await query.edit_message_text(
+                            format_quick_install_progress(
+                                service_name,
+                                action.get("ip", ""),
+                                min(45, 30 + elapsed),
+                                "等待 OVH 返回 SSH 密钥",
+                                f"步骤 2/4 · 已等待 {elapsed} 秒，20 秒后自动超时",
+                            ),
+                            parse_mode="Markdown",
+                        )
+
                     try:
-                        keys = await run_ovh_call(ovh_client.list_ssh_keys)
+                        keys = await run_ovh_call_with_heartbeat(
+                            ovh_client.list_ssh_keys,
+                            timeout=20,
+                            heartbeat=5,
+                            on_wait=update_key_wait,
+                        )
                     except TimeoutError as exc:
                         await query.edit_message_text(
                             f"❌ 一键安装准备超时\n\n服务器: `{service_name}`\n`{exc}`",
@@ -3004,6 +3131,16 @@ def run_bot(cfg: dict):
                     )
                     return
 
+                await query.edit_message_text(
+                    format_quick_install_progress(
+                        service_name,
+                        action.get("ip", ""),
+                        65,
+                        "检查 RAID0 安装盘",
+                        "步骤 3/4 · SSD 与 HDD 分组检查",
+                    ),
+                    parse_mode="Markdown",
+                )
                 raid_group = select_default_raid_group(
                     action.get("disk_groups", []), action.get("default_group")
                 )
@@ -3037,14 +3174,17 @@ def run_bot(cfg: dict):
                     "data_disk_group_id": None,
                     "data_raid_disks": None,
                     "raid_text": raid_text,
+                    "quick_install": True,
                 }
                 await query.edit_message_text(
-                    f"⚡ *一键安装预设*\n\n"
+                    f"⚡ *一键安装进度*\n\n"
                     + f"🖥️ 服务器: `{service_name}`\n"
                     + (f"🌐 IP: `{action.get('ip')}`\n" if action.get("ip") else "")
                     + f"💿 系统: `{default_template}`\n"
                     + f"🔑 SSH 密钥: `{default_key}`\n"
                     + f"🧩 安装盘: `{raid_text}`\n\n"
+                    + f"`{progress_bar_text(100)}` 100%\n"
+                    + f"📌 当前步骤: `预设准备完成，等待确认`\n\n"
                     + f"SSD 与 HDD 不会混组；本次只使用 group={group_id}。\n"
                     + f"🚨 确认后该组所有数据将被清除！",
                     parse_mode="Markdown",
@@ -4028,12 +4168,46 @@ def run_bot(cfg: dict):
                 data_raid0 = action.get("data_raid0", False)
                 data_disk_group_id = action.get("data_disk_group_id")
                 data_raid_disks = action.get("data_raid_disks")
-                await query.edit_message_text(f"⏳ 正在安装 `{template}` 到 `{service_name}`...")
+                await query.edit_message_text(
+                    format_quick_install_progress(
+                        service_name,
+                        ip_address,
+                        2,
+                        "向 OVH 提交安装任务",
+                        "最长等待 45 秒，期间每 5 秒刷新",
+                    ) if action.get("quick_install") else (
+                        f"⏳ 正在安装 `{template}` 到 `{service_name}`...\n"
+                        "最长等待 OVH 响应 45 秒"
+                    ),
+                    parse_mode="Markdown",
+                )
+
+                async def update_install_submit_wait(elapsed: int):
+                    if not action.get("quick_install"):
+                        await query.edit_message_text(
+                            f"⏳ 正在向 OVH 提交 `{template}` 安装任务...\n\n"
+                            f"服务器: `{service_name}`\n已等待: {elapsed} 秒 / 最长 45 秒",
+                            parse_mode="Markdown",
+                        )
+                        return
+                    await query.edit_message_text(
+                        format_quick_install_progress(
+                            service_name,
+                            ip_address,
+                            min(4, 2 + elapsed // 15),
+                            "等待 OVH 接收安装任务",
+                            f"已等待 {elapsed} 秒 / 最长 45 秒",
+                        ),
+                        parse_mode="Markdown",
+                    )
+
                 try:
-                    result = await run_ovh_call(
+                    result = await run_ovh_call_with_heartbeat(
                         ovh_client.reinstall_server,
                         service_name, template, hostname,
                         timeout=45,
+                        heartbeat=5,
+                        on_wait=update_install_submit_wait,
                         ssh_key_name=ssh_key_name, raid0=raid0,
                         raid_disks=raid_disks, disk_group_id=disk_group_id,
                         data_raid0=data_raid0, data_disk_group_id=data_disk_group_id,
@@ -4103,6 +4277,9 @@ def run_bot(cfg: dict):
             except Exception as e:
                 logger.error(f"删除取消消息失败: {e}")
                 await query.edit_message_reply_markup(reply_markup=None)
+
+    async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await execute_callback_safely(_button_callback_impl, update, context)
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理转发的消息，自动解析服务器信息并下单（支持存储类型识别）"""
@@ -4222,7 +4399,8 @@ def run_bot(cfg: dict):
         return text
 
     # ---- 构建 Bot ----
-    app = ApplicationBuilder().token(bot_token).build()
+    # OVH 请求较慢时仍允许 Telegram 按钮回调及时进入，避免 callback query 过期。
+    app = ApplicationBuilder().token(bot_token).concurrent_updates(4).build()
     bot_app = app
 
     app.add_handler(CommandHandler("start", start_cmd))
