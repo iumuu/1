@@ -332,6 +332,65 @@ def select_default_ssh_key(keys: list, configured_key: str = ""):
     return cleaned[0] if cleaned else None
 
 
+SERVER_LIST_PAGE_TEXT_LIMIT = 3400
+SERVER_LIST_PAGE_SIZE = 4
+
+
+def _truncate_server_entry(entry: dict, max_chars: int) -> dict:
+    """按完整行截断单台服务器详情，避免破坏 Markdown 代码标记。"""
+    text = str(entry.get("text", ""))
+    if len(text) <= max_chars:
+        return entry
+
+    marker = "   … 其余详情已省略"
+    lines = []
+    used = 0
+    for line in text.splitlines():
+        added = len(line) + (1 if lines else 0)
+        if used + added + len(marker) + 1 > max_chars:
+            break
+        lines.append(line)
+        used += added
+    if not lines:
+        lines = ["⚠️ 单台服务器详情过长，已省略"]
+    lines.append(marker)
+    trimmed = dict(entry)
+    trimmed["text"] = "\n".join(lines)
+    return trimmed
+
+
+def paginate_server_entries(
+    entries: list,
+    max_chars: int = SERVER_LIST_PAGE_TEXT_LIMIT,
+    max_items: int = SERVER_LIST_PAGE_SIZE,
+) -> list:
+    """按正文长度和服务器数量分页，确保 Telegram 消息不会超限。"""
+    if max_chars < 100 or max_items < 1:
+        raise ValueError("分页限制无效")
+
+    pages = []
+    current = []
+    current_chars = 0
+    for raw_entry in entries:
+        entry = _truncate_server_entry(raw_entry, max_chars)
+        entry_text = str(entry.get("text", ""))
+        separator_len = 2 if current else 0
+        if current and (
+            len(current) >= max_items
+            or current_chars + separator_len + len(entry_text) > max_chars
+        ):
+            pages.append(current)
+            current = []
+            current_chars = 0
+            separator_len = 0
+        current.append(entry)
+        current_chars += separator_len + len(entry_text)
+
+    if current:
+        pages.append(current)
+    return pages or [[]]
+
+
 def format_memory(memory: str) -> str:
     """格式化内存显示"""
     if not memory or memory == "N/A":
@@ -1772,6 +1831,7 @@ def run_bot(cfg: dict):
     pending_actions = {}
     watch_sessions = {}
     buy_sessions = {}
+    server_list_sessions = {}
     order_lock = asyncio.Lock()
 
     async def watch_monitor_loop():
@@ -2326,6 +2386,38 @@ def run_bot(cfg: dict):
         except Exception as e:
             await update.message.reply_text(f"❌ 查询失败: {e}")
 
+    def render_servers_page(session_id: str, requested_page: int):
+        session = server_list_sessions.get(session_id)
+        if not session:
+            return None
+        pages = session["pages"]
+        page = max(0, min(int(requested_page), len(pages) - 1))
+        entries = pages[page]
+
+        lines = [
+            f"🖥️ 独立服务器列表 ({session['total']} 台) · 第 {page + 1}/{len(pages)} 页\n"
+        ]
+        keyboard = []
+        for entry in entries:
+            lines.append(entry["text"])
+            lines.append("")
+            keyboard.extend(entry.get("keyboard", []))
+        lines.append("💡 点按钮即可安装系统或重启服务器")
+
+        navigation = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton(
+                "◀️ 上一页", callback_data=f"servers|p|{session_id}|{page - 1}"
+            ))
+        if page + 1 < len(pages):
+            navigation.append(InlineKeyboardButton(
+                "下一页 ▶️", callback_data=f"servers|p|{session_id}|{page + 1}"
+            ))
+        if navigation:
+            keyboard.append(navigation)
+        keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
+        return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
     async def servers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """列出所有独立服务器"""
         if not check_user(update.effective_user.id):
@@ -2345,21 +2437,21 @@ def run_bot(cfg: dict):
                 default_group = hw.get("defaultDiskGroupId") if isinstance(hw, dict) else None
                 server_items.append((s, disk_groups, default_group))
 
-            lines = [f"🖥️ 独立服务器列表 ({len(server_items)} 台)\n"]
-            keyboard = []
+            session_id = str(int(time.time() * 1000))[-10:]
+            entries = []
             for i, (s, disk_groups, default_group) in enumerate(server_items):
                 state_emoji = {"ok": "🟢", "error": "🔴"}.get(s.get("state", ""), "🟡")
 
-                lines.append(f"{state_emoji} {i+1}. `{s['name']}`")
-                lines.append(f"   📦 `{s.get('commercial_range','?')}`")
-                lines.append(f"   💻 `{s.get('os','?')}` | 📍 `{s.get('datacenter','?')}`")
+                entry_lines = [f"{state_emoji} {i+1}. `{s['name']}`"]
+                entry_lines.append(f"   📦 `{s.get('commercial_range','?')}`")
+                entry_lines.append(f"   💻 `{s.get('os','?')}` | 📍 `{s.get('datacenter','?')}`")
                 if s.get("ip"):
-                    lines.append(f"   🌐 `{s['ip']}`")
+                    entry_lines.append(f"   🌐 `{s['ip']}`")
                 note = get_server_note(s["name"])
                 if note:
-                    lines.append(f"   📝 备注: *{note}*")
+                    entry_lines.append(f"   📝 备注: *{note}*")
                 if disk_groups:
-                    lines.append("   💾 安装盘组（SSD/HDD 独立）:")
+                    entry_lines.append("   💾 安装盘组（SSD/HDD 独立）:")
                     ordered_groups = sorted(
                         disk_groups,
                         key=lambda group: (
@@ -2368,37 +2460,46 @@ def run_bot(cfg: dict):
                         ),
                     )
                     for dg in ordered_groups:
-                        lines.append(f"      {format_disk_group(dg, default_group)}")
+                        entry_lines.append(f"      {format_disk_group(dg, default_group)}")
                 else:
-                    lines.append("   💾 安装盘组: OVH 未返回磁盘信息")
-                lines.append("")
+                    entry_lines.append("   💾 安装盘组: OVH 未返回磁盘信息")
 
-                action_id = f"srv{i+1}_{str(int(time.time() * 1000))[-6:]}"
+                action_id = f"srv{i+1}_{session_id[-6:]}"
                 pending_actions[action_id] = {
                     "type": "server", "service_name": s["name"], "index": i+1,
                     "ip": s.get("ip", ""),
                     "disk_groups": disk_groups, "default_group": default_group,
                 }
+                entry_keyboard = []
                 if select_default_raid_group(disk_groups, default_group):
-                    keyboard.append([InlineKeyboardButton(
+                    entry_keyboard.append([InlineKeyboardButton(
                         f"⚡ 一键安装 {i+1}", callback_data=f"srv|quick|{action_id}"
                     )])
-                keyboard.append([
+                entry_keyboard.append([
                     InlineKeyboardButton(f"💿 安装 {i+1}", callback_data=f"srv|install|{action_id}"),
                     InlineKeyboardButton(f"🔄 重启 {i+1}", callback_data=f"srv|reboot|{action_id}"),
                 ])
                 if note:
-                    keyboard.append([InlineKeyboardButton(
+                    entry_keyboard.append([InlineKeyboardButton(
                         f"📝 清除 {i+1} 的“没中”", callback_data=f"srvnote|clear|{action_id}"
                     )])
+                entries.append({"text": "\n".join(entry_lines), "keyboard": entry_keyboard})
 
-            lines.append("💡 点按钮即可安装系统或重启服务器")
-            keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
-            await msg.edit_text(
-                "\n".join(lines),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
+            server_list_sessions[session_id] = {
+                "pages": paginate_server_entries(entries),
+                "total": len(server_items),
+                "created_at": time.time(),
+            }
+            if len(server_list_sessions) > 50:
+                oldest = sorted(
+                    server_list_sessions,
+                    key=lambda key: server_list_sessions[key].get("created_at", 0),
+                )[:-50]
+                for old_session_id in oldest:
+                    server_list_sessions.pop(old_session_id, None)
+
+            text, markup = render_servers_page(session_id, 0)
+            await msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
         except Exception as e:
             await msg.edit_text(f"❌ 获取失败: {e}")
 
@@ -2701,6 +2802,23 @@ def run_bot(cfg: dict):
                 "\n".join(lines),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        elif parts[0] == "servers" and len(parts) >= 4 and parts[1] == "p":
+            session_id = parts[2]
+            try:
+                page = int(parts[3])
+            except ValueError:
+                return
+            rendered = render_servers_page(session_id, page)
+            if not rendered:
+                await query.edit_message_text("❌ 服务器列表已过期，请重新 /servers")
+                return
+            text, markup = rendered
+            await query.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=markup,
             )
 
         elif parts[0] == "srvnote" and len(parts) >= 3:
