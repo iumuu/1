@@ -70,6 +70,51 @@ class OVHCallTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(TimeoutError, "OVH API 0.01 秒无响应"):
             await bot.run_ovh_call(time.sleep, 0.05, timeout=0.01)
 
+    async def test_long_ovh_call_emits_heartbeat_updates(self):
+        elapsed_updates = []
+
+        async def record_wait(elapsed):
+            elapsed_updates.append(elapsed)
+
+        result = await bot.run_ovh_call_with_heartbeat(
+            time.sleep,
+            0.04,
+            timeout=0.2,
+            heartbeat=0.01,
+            on_wait=record_wait,
+        )
+
+        self.assertIsNone(result)
+        self.assertGreaterEqual(len(elapsed_updates), 1)
+
+    async def test_callback_exception_is_visible_to_user(self):
+        class FakeMessage:
+            async def reply_text(self, text):
+                self.reply = text
+
+        class FakeQuery:
+            def __init__(self):
+                self.message = FakeMessage()
+                self.edited = None
+                self.alert = None
+
+            async def answer(self, text, show_alert=False):
+                self.alert = (text, show_alert)
+
+            async def edit_message_text(self, text):
+                self.edited = text
+
+        async def broken_handler(update, context):
+            raise RuntimeError("test failure")
+
+        query = FakeQuery()
+        update = types.SimpleNamespace(callback_query=query)
+        await bot.execute_callback_safely(broken_handler, update, None)
+
+        self.assertEqual(query.alert, ("按钮处理失败", True))
+        self.assertIn("RuntimeError", query.edited)
+        self.assertIn("/servers", query.edited)
+
 
 class DiskSelectionTests(unittest.TestCase):
     def test_disk_types_distinguish_ssd_and_hdd(self):
@@ -173,6 +218,21 @@ class ServerPaginationTests(unittest.TestCase):
             "label": "Debian 12 (默认)",
         })
         self.assertIn("ubuntu2404-server_64", [item["template"] for item in choices])
+
+    def test_quick_install_progress_shows_server_ip_stage_and_percent(self):
+        text = bot.format_quick_install_progress(
+            "ns123456.ip-192-0-2.eu",
+            "192.0.2.10",
+            30,
+            "读取 OVH SSH 密钥",
+            "步骤 2/4 · 最长等待 20 秒",
+        )
+
+        self.assertIn("`ns123456.ip-192-0-2.eu`", text)
+        self.assertIn("`192.0.2.10`", text)
+        self.assertIn("30%", text)
+        self.assertIn("读取 OVH SSH 密钥", text)
+        self.assertIn("最长等待 20 秒", text)
 
 
 class QuickBuySafetyTests(unittest.TestCase):
