@@ -2596,21 +2596,14 @@ def run_bot(cfg: dict):
 
         msg = await update.message.reply_text("⏳ 正在获取服务器列表...")
         try:
-            servers = await run_ovh_call(ovh_client.list_servers)
+            servers = await asyncio.to_thread(ovh_client.list_servers)
             if not servers:
                 await msg.edit_text("📭 没有找到独立服务器")
                 return
 
             server_items = []
             for s in servers:
-                try:
-                    hw = await run_ovh_call(
-                        ovh_client.get_server_hardware,
-                        s["name"],
-                    )
-                except TimeoutError as exc:
-                    logger.warning("/servers 跳过硬件查询超时的服务 %s: %s", s["name"], exc)
-                    continue
+                hw = await asyncio.to_thread(ovh_client.get_server_hardware, s["name"])
                 disk_groups = extract_installable_disk_groups(hw)
                 if not disk_groups:
                     logger.info("/servers 隐藏无有效磁盘组的服务: %s", s["name"])
