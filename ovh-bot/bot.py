@@ -113,6 +113,17 @@ def execute_buy_batch(client, count: int, **buy_kwargs) -> list:
     return results
 
 
+async def run_ovh_call(func, *args, timeout: float = 20, **kwargs):
+    """在线程中执行 OVH 请求，并将无限等待转换为可恢复的超时错误。"""
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs),
+            timeout=max(0.001, float(timeout)),
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"OVH API {timeout} 秒无响应") from exc
+
+
 def load_config() -> dict:
     """加载配置，优先级: 环境变量 > config.toml > 默认值"""
     # 按优先级查找配置文件
@@ -440,6 +451,34 @@ def selected_server_action_specs(action_id: str, quick_available: bool = True) -
     return rows
 
 
+REINSTALL_TEMPLATE_LABELS = {
+    "debian12_64": "Debian 12",
+    "debian13_64": "Debian 13",
+    "ubuntu2404-server_64": "Ubuntu 24.04 LTS",
+    "ubuntu2204-server_64": "Ubuntu 22.04 LTS",
+    "proxmox8_64": "Proxmox VE 8",
+    "proxmox9_64": "Proxmox VE 9",
+    "rocky9_64": "Rocky Linux 9",
+    "alma9_64": "AlmaLinux 9",
+}
+
+
+def reinstall_template_choices(default_template: str = "debian12_64") -> list:
+    """返回无需查询 compatibleTemplates 即可显示的常用安装系统。"""
+    ordered = list(REINSTALL_TEMPLATE_LABELS)
+    if default_template in ordered:
+        ordered.remove(default_template)
+        ordered.insert(0, default_template)
+    return [
+        {
+            "template": template,
+            "label": REINSTALL_TEMPLATE_LABELS[template]
+            + (" (默认)" if template == default_template else ""),
+        }
+        for template in ordered
+    ]
+
+
 def format_memory(memory: str) -> str:
     """格式化内存显示"""
     if not memory or memory == "N/A":
@@ -570,6 +609,7 @@ class OVHClient:
             application_key=self.ak,
             application_secret=self.as_,
             consumer_key=self.ck,
+            timeout=20,
         )
 
         self.defaults = cfg.get("defaults", {})
@@ -2934,25 +2974,24 @@ def run_bot(cfg: dict):
                     f"⏳ 正在准备一键安装...\n\n服务器: `{service_name}`",
                     parse_mode="Markdown",
                 )
-                templates, keys = await asyncio.gather(
-                    asyncio.to_thread(ovh_client.get_server_templates, service_name),
-                    asyncio.to_thread(ovh_client.list_ssh_keys),
-                )
                 default_template = cfg.get("defaults", {}).get("reinstall_os", "debian12_64")
-                if default_template not in templates:
-                    await query.edit_message_text(
-                        f"❌ 一键安装不可用\n\n服务器: `{service_name}`\n"
-                        f"OVH 未提供默认模板 `{default_template}`，请返回手动选择系统。",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton("💿 手动安装", callback_data=f"srv|install|{action_id}"),
-                            InlineKeyboardButton("取消", callback_data="cancel"),
-                        ]]),
-                    )
-                    return
-
                 configured_key = cfg.get("defaults", {}).get("ssh_key", "")
-                default_key = select_default_ssh_key(keys, configured_key)
+                if configured_key:
+                    default_key = configured_key
+                else:
+                    try:
+                        keys = await run_ovh_call(ovh_client.list_ssh_keys)
+                    except TimeoutError as exc:
+                        await query.edit_message_text(
+                            f"❌ 一键安装准备超时\n\n服务器: `{service_name}`\n`{exc}`",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🔄 重试一键安装", callback_data=f"srv|quick|{action_id}")],
+                                [InlineKeyboardButton("💿 手动安装", callback_data=f"srv|install|{action_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                            ]),
+                        )
+                        return
+                    default_key = select_default_ssh_key(keys)
                 if not default_key:
                     await query.edit_message_text(
                         f"❌ 一键安装不可用\n\n服务器: `{service_name}`\n"
@@ -3016,40 +3055,12 @@ def run_bot(cfg: dict):
                 )
 
             elif op == "install":
-                await query.edit_message_text(
-                    f"⏳ 正在获取可安装系统...\n\n服务器: `{service_name}`",
-                    parse_mode="Markdown",
-                )
-                templates = await asyncio.to_thread(ovh_client.get_server_templates, service_name)
-                if not templates:
-                    await query.edit_message_text(
-                        f"❌ 获取可安装系统失败\n\n服务器: `{service_name}`\n请稍后重试。",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton("⬅️ 返回服务器", callback_data=f"srv|select|{action_id}"),
-                            InlineKeyboardButton("取消", callback_data="cancel"),
-                        ]]),
-                    )
-                    return
-                preferred = [
-                    "debian12_64", "debian13_64",
-                    "ubuntu2404-server_64", "ubuntu2204-server_64",
-                    "proxmox8_64", "proxmox9_64",
-                    "rocky9_64", "alma9_64",
-                ]
-                available = [t for t in preferred if t in templates]
-                if not available:
-                    available = templates[:8]
+                default_template = cfg.get("defaults", {}).get("reinstall_os", "debian12_64")
                 keyboard = []
-                template_labels = {
-                    "debian12_64": "Debian 12 (默认)",
-                    "debian13_64": "Debian 13",
-                    "ubuntu2404-server_64": "Ubuntu 24.04 LTS",
-                    "ubuntu2204-server_64": "Ubuntu 22.04 LTS",
-                }
-                for t in available:
+                for choice in reinstall_template_choices(default_template):
                     keyboard.append([InlineKeyboardButton(
-                        template_labels.get(t, t), callback_data=f"srv|os|{action_id}|{t}"
+                        choice["label"],
+                        callback_data=f"srv|os|{action_id}|{choice['template']}",
                     )])
                 keyboard.append([
                     InlineKeyboardButton("⬅️ 返回服务器", callback_data=f"srv|select|{action_id}"),
@@ -3065,7 +3076,23 @@ def run_bot(cfg: dict):
 
             elif op == "os" and len(parts) >= 4:
                 action["template"] = parts[3]
-                keys = await asyncio.to_thread(ovh_client.list_ssh_keys)
+                await query.edit_message_text(
+                    f"⏳ 正在获取 SSH 密钥...\n\n服务器: `{service_name}`\n系统: `{action['template']}`",
+                    parse_mode="Markdown",
+                )
+                try:
+                    keys = await run_ovh_call(ovh_client.list_ssh_keys)
+                except TimeoutError as exc:
+                    await query.edit_message_text(
+                        f"⚠️ 获取 SSH 密钥超时\n\n服务器: `{service_name}`\n`{exc}`\n\n可重试，或不使用密钥继续。",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 重试获取密钥", callback_data=f"srv|os|{action_id}|{action['template']}")],
+                            [InlineKeyboardButton("不使用 SSH key 继续", callback_data=f"srv|key|{action_id}|none")],
+                            [InlineKeyboardButton("⬅️ 返回系统", callback_data=f"srv|install|{action_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                        ]),
+                    )
+                    return
                 configured_key = cfg.get("defaults", {}).get("ssh_key", "")
                 default_key = select_default_ssh_key(keys, configured_key)
                 ordered_keys = ([default_key] if default_key else []) + [key for key in keys if key != default_key]
@@ -4003,9 +4030,10 @@ def run_bot(cfg: dict):
                 data_raid_disks = action.get("data_raid_disks")
                 await query.edit_message_text(f"⏳ 正在安装 `{template}` 到 `{service_name}`...")
                 try:
-                    result = await asyncio.to_thread(
+                    result = await run_ovh_call(
                         ovh_client.reinstall_server,
                         service_name, template, hostname,
+                        timeout=45,
                         ssh_key_name=ssh_key_name, raid0=raid0,
                         raid_disks=raid_disks, disk_group_id=disk_group_id,
                         data_raid0=data_raid0, data_disk_group_id=data_disk_group_id,
