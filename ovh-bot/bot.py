@@ -391,6 +391,20 @@ def paginate_server_entries(
     return pages or [[]]
 
 
+def server_list_action_specs(index: int, action_id: str, has_note: bool = False) -> list:
+    """服务器列表只负责选中目标，一键安装入口放在选择后的页面。"""
+    rows = [[
+        {"text": f"🖥️ 选择 {index}", "callback_data": f"srv|install|{action_id}"},
+        {"text": f"🔄 重启 {index}", "callback_data": f"srv|reboot|{action_id}"},
+    ]]
+    if has_note:
+        rows.append([{
+            "text": f"📝 清除 {index} 的“没中”",
+            "callback_data": f"srvnote|clear|{action_id}",
+        }])
+    return rows
+
+
 def format_memory(memory: str) -> str:
     """格式化内存显示"""
     if not memory or memory == "N/A":
@@ -2402,7 +2416,7 @@ def run_bot(cfg: dict):
             lines.append(entry["text"])
             lines.append("")
             keyboard.extend(entry.get("keyboard", []))
-        lines.append("💡 点按钮即可安装系统或重启服务器")
+        lines.append("💡 先选择服务器，再选择一键安装或手动安装")
 
         navigation = []
         if page > 0:
@@ -2470,19 +2484,10 @@ def run_bot(cfg: dict):
                     "ip": s.get("ip", ""),
                     "disk_groups": disk_groups, "default_group": default_group,
                 }
-                entry_keyboard = []
-                if select_default_raid_group(disk_groups, default_group):
-                    entry_keyboard.append([InlineKeyboardButton(
-                        f"⚡ 一键安装 {i+1}", callback_data=f"srv|quick|{action_id}"
-                    )])
-                entry_keyboard.append([
-                    InlineKeyboardButton(f"💿 安装 {i+1}", callback_data=f"srv|install|{action_id}"),
-                    InlineKeyboardButton(f"🔄 重启 {i+1}", callback_data=f"srv|reboot|{action_id}"),
-                ])
-                if note:
-                    entry_keyboard.append([InlineKeyboardButton(
-                        f"📝 清除 {i+1} 的“没中”", callback_data=f"srvnote|clear|{action_id}"
-                    )])
+                entry_keyboard = [
+                    [InlineKeyboardButton(**button) for button in row]
+                    for row in server_list_action_specs(i + 1, action_id, bool(note))
+                ]
                 entries.append({"text": "\n".join(entry_lines), "keyboard": entry_keyboard})
 
             server_list_sessions[session_id] = {
@@ -2978,8 +2983,9 @@ def run_bot(cfg: dict):
                     )])
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
-                    f"💿 *选择要安装的系统*\n\n服务器: `{service_name}`"
-                    + (f"\nIP: `{action.get('ip')}`" if action.get("ip") else ""),
+                    f"🖥️ *已选择服务器*\n\n服务器: `{service_name}`"
+                    + (f"\nIP: `{action.get('ip')}`" if action.get("ip") else "")
+                    + "\n\n请选择一键安装或手动选择系统：",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
