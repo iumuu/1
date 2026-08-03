@@ -247,14 +247,19 @@ class ServerPaginationTests(unittest.TestCase):
         self.assertEqual(page[0]["keyboard"], [["install"]])
 
     def test_server_list_selects_before_offering_quick_install(self):
-        rows = bot.server_list_action_specs(2, "srv2_123456", has_note=True)
+        rows = bot.server_list_action_specs(
+            2,
+            "srv2_123456",
+            has_note=True,
+            service_name="ns123456.ip-192-0-2.eu",
+        )
         callbacks = [button["callback_data"] for row in rows for button in row]
         labels = [button["text"] for row in rows for button in row]
 
         self.assertEqual(callbacks[0], "srv|select|srv2_123456")
         self.assertIn("选择 2", labels[0])
         self.assertNotIn("srv|quick|srv2_123456", callbacks)
-        self.assertIn("srvnote|clear|srv2_123456", callbacks)
+        self.assertIn("sn|lc|ns123456.ip-192-0-2.eu", callbacks)
 
         selected_rows = bot.selected_server_action_specs("srv2_123456")
         selected_callbacks = [
@@ -276,6 +281,25 @@ class ServerPaginationTests(unittest.TestCase):
             "srv|quick_noraid|srv2_123456",
             "srv|install|srv2_123456",
         ])
+
+    def test_multiple_server_note_buttons_have_independent_persistent_targets(self):
+        first = bot.server_note_callback_data(
+            "miss", "ns111111.ip-192-0-2.eu", "finish"
+        )
+        second = bot.server_note_callback_data(
+            "miss", "ns222222.ip-192-0-2.eu", "finish"
+        )
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            bot.parse_server_note_callback(first),
+            ("finish", "miss", "ns111111.ip-192-0-2.eu"),
+        )
+        self.assertEqual(
+            bot.parse_server_note_callback(second),
+            ("finish", "miss", "ns222222.ip-192-0-2.eu"),
+        )
+        self.assertLessEqual(len(first.encode("utf-8")), 64)
 
     def test_system_choices_do_not_require_compatible_templates_api(self):
         choices = bot.reinstall_template_choices("debian12_64")
