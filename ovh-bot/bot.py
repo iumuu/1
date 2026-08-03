@@ -535,7 +535,6 @@ def server_list_action_specs(
 def selected_server_action_specs(
     action_id: str,
     quick_available: bool = True,
-    has_note: bool = False,
 ) -> list:
     """选中服务器后再提供一键安装和手动安装。"""
     rows = []
@@ -552,11 +551,6 @@ def selected_server_action_specs(
         "text": "💿 手动选择系统",
         "callback_data": f"srv|install|{action_id}",
     }])
-    if has_note:
-        rows.append([{
-            "text": "🗑️ 清除“没中”备注",
-            "callback_data": f"srv|clear_note|{action_id}",
-        }])
     return rows
 
 
@@ -2376,19 +2370,14 @@ def run_bot(cfg: dict):
                     else:
                         text += "\n\n✅ 安装完成"
 
-                    if not install_failed:
-                        if get_server_note(service_name) == "没中":
-                            note_label = "📝 清除“没中”备注"
-                            note_callback = server_note_callback_data(
-                                "clear", service_name, "finish"
-                            )
-                        else:
-                            note_label = "📝 标记“没中”"
-                            note_callback = server_note_callback_data(
-                                "miss", service_name, "finish"
-                            )
+                    if not install_failed and get_server_note(service_name) != "没中":
+                        note_callback = server_note_callback_data(
+                            "miss", service_name, "finish"
+                        )
                         reply_markup = InlineKeyboardMarkup([[
-                            InlineKeyboardButton(note_label, callback_data=note_callback)
+                            InlineKeyboardButton(
+                                "📝 标记“没中”", callback_data=note_callback
+                            )
                         ]])
                 else:
                     text += "\n\n⏳ Bot 会自动刷新此进度。"
@@ -3115,10 +3104,6 @@ def run_bot(cfg: dict):
                 }
                 save_server_notes()
                 result_text = f"📝 已为 `{service_name}` 标记：*没中*"
-                next_label = "📝 清除“没中”备注"
-                next_callback = server_note_callback_data(
-                    "clear", service_name, note_source
-                )
             else:
                 server_notes.pop(service_name, None)
                 save_server_notes()
@@ -3129,9 +3114,12 @@ def run_bot(cfg: dict):
                 )
 
             if note_source == "finish":
-                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(next_label, callback_data=next_callback)
-                ]]))
+                if note_op == "miss":
+                    await query.edit_message_reply_markup(reply_markup=None)
+                else:
+                    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(next_label, callback_data=next_callback)
+                    ]]))
             else:
                 await query.message.reply_text(result_text, parse_mode="Markdown")
 
@@ -3185,7 +3173,6 @@ def run_bot(cfg: dict):
                         bool(select_default_raid_group(
                             action.get("disk_groups", []), action.get("default_group")
                         )),
-                        get_server_note(service_name) == "没中",
                     )
                 ]
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
@@ -3195,20 +3182,6 @@ def run_bot(cfg: dict):
                     + "\n\n请选择安装方式：",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-
-            elif op == "clear_note":
-                server_notes.pop(service_name, None)
-                save_server_notes()
-                await query.edit_message_text(
-                    f"✅ 已清除 `{service_name}` 的“没中”备注",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(
-                            "↩️ 返回服务器操作",
-                            callback_data=f"srv|select|{action_id}",
-                        )
-                    ]]),
                 )
 
             elif op in ("quick", "quick_noraid"):

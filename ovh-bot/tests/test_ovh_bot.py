@@ -259,9 +259,7 @@ class ServerPaginationTests(unittest.TestCase):
         self.assertNotIn("srv|quick|srv2_123456", callbacks)
         self.assertNotIn("清除", "".join(labels))
 
-        selected_rows = bot.selected_server_action_specs(
-            "srv2_123456", has_note=True
-        )
+        selected_rows = bot.selected_server_action_specs("srv2_123456")
         selected_callbacks = [
             button["callback_data"] for row in selected_rows for button in row
         ]
@@ -269,7 +267,6 @@ class ServerPaginationTests(unittest.TestCase):
             "srv|quick|srv2_123456",
             "srv|quick_noraid|srv2_123456",
             "srv|install|srv2_123456",
-            "srv|clear_note|srv2_123456",
         ])
 
         no_raid_rows = bot.selected_server_action_specs(
