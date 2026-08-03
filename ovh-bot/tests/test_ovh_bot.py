@@ -267,7 +267,17 @@ class ServerPaginationTests(unittest.TestCase):
             "srv|quick|srv2_123456",
             "srv|quick_noraid|srv2_123456",
             "srv|install|srv2_123456",
+            "srvnote|miss|srv2_123456",
         ])
+
+        selected_with_note = bot.selected_server_action_specs(
+            "srv2_123456", has_miss_note=True
+        )
+        selected_with_note_callbacks = [
+            button["callback_data"] for row in selected_with_note for button in row
+        ]
+        self.assertEqual(selected_with_note_callbacks[-1], "srvnote|clear|srv2_123456")
+        self.assertIn("清除", selected_with_note[-1][0]["text"])
 
         no_raid_rows = bot.selected_server_action_specs(
             "srv2_123456", quick_available=False
@@ -278,6 +288,7 @@ class ServerPaginationTests(unittest.TestCase):
         self.assertEqual(no_raid_callbacks, [
             "srv|quick_noraid|srv2_123456",
             "srv|install|srv2_123456",
+            "srvnote|miss|srv2_123456",
         ])
 
     def test_multiple_server_note_buttons_have_independent_persistent_targets(self):

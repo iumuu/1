@@ -535,8 +535,9 @@ def server_list_action_specs(
 def selected_server_action_specs(
     action_id: str,
     quick_available: bool = True,
+    has_miss_note: bool = False,
 ) -> list:
-    """选中服务器后再提供一键安装和手动安装。"""
+    """选中服务器后提供安装与备注管理，备注按钮不出现在总览页。"""
     rows = []
     if quick_available:
         rows.append([{
@@ -550,6 +551,10 @@ def selected_server_action_specs(
     rows.append([{
         "text": "💿 手动选择系统",
         "callback_data": f"srv|install|{action_id}",
+    }])
+    rows.append([{
+        "text": "📝 清除“没中”备注" if has_miss_note else "📝 标记“没中”",
+        "callback_data": f"srvnote|{'clear' if has_miss_note else 'miss'}|{action_id}",
     }])
     return rows
 
@@ -3149,7 +3154,22 @@ def run_bot(cfg: dict):
             else:
                 return
 
-            if action.get("type") == "server_note":
+            if action.get("type") == "server":
+                rows = [
+                    [InlineKeyboardButton(**button) for button in row]
+                    for row in selected_server_action_specs(
+                        action_id,
+                        bool(select_default_raid_group(
+                            action.get("disk_groups", []), action.get("default_group")
+                        )),
+                        get_server_note(service_name) == "没中",
+                    )
+                ]
+                rows.append([InlineKeyboardButton("取消", callback_data="cancel")])
+                await query.edit_message_reply_markup(
+                    reply_markup=InlineKeyboardMarkup(rows)
+                )
+            elif action.get("type") == "server_note":
                 await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton(next_label, callback_data=next_callback)
                 ]]))
@@ -3173,6 +3193,7 @@ def run_bot(cfg: dict):
                         bool(select_default_raid_group(
                             action.get("disk_groups", []), action.get("default_group")
                         )),
+                        get_server_note(service_name) == "没中",
                     )
                 ]
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
