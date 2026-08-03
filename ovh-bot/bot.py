@@ -494,7 +494,39 @@ def paginate_server_entries(
     return pages or [[]]
 
 
-def server_list_action_specs(index: int, action_id: str, has_note: bool = False) -> list:
+def server_note_callback_data(operation: str, service_name: str, source: str) -> str:
+    """生成不依赖内存操作表的备注按钮数据。"""
+    op_code = {"miss": "m", "clear": "c"}.get(operation)
+    source_code = {"finish": "f", "list": "l"}.get(source)
+    if not op_code or not source_code:
+        raise ValueError("无效的服务器备注操作")
+    service_name = str(service_name or "").strip()
+    if not service_name or "|" in service_name:
+        raise ValueError("无效的 OVH 服务器名称")
+    callback_data = f"sn|{source_code}{op_code}|{service_name}"
+    if len(callback_data.encode("utf-8")) > 64:
+        raise ValueError("服务器名称过长，无法生成 Telegram 备注按钮")
+    return callback_data
+
+
+def parse_server_note_callback(callback_data: str):
+    parts = str(callback_data or "").split("|", 2)
+    if len(parts) != 3 or parts[0] != "sn" or len(parts[1]) != 2:
+        return None
+    source = {"f": "finish", "l": "list"}.get(parts[1][0])
+    operation = {"m": "miss", "c": "clear"}.get(parts[1][1])
+    service_name = parts[2].strip()
+    if not source or not operation or not service_name:
+        return None
+    return source, operation, service_name
+
+
+def server_list_action_specs(
+    index: int,
+    action_id: str,
+    has_note: bool = False,
+    service_name: str = "",
+) -> list:
     """服务器列表只负责选中目标，一键安装入口放在选择后的页面。"""
     rows = [[
         {"text": f"🖥️ 选择 {index}", "callback_data": f"srv|select|{action_id}"},
@@ -503,7 +535,10 @@ def server_list_action_specs(index: int, action_id: str, has_note: bool = False)
     if has_note:
         rows.append([{
             "text": f"📝 清除 {index} 的“没中”",
-            "callback_data": f"srvnote|clear|{action_id}",
+            "callback_data": (
+                server_note_callback_data("clear", service_name, "list")
+                if service_name else f"srvnote|clear|{action_id}"
+            ),
         }])
     return rows
 
@@ -2344,17 +2379,16 @@ def run_bot(cfg: dict):
                         text += "\n\n✅ 安装完成"
 
                     if not install_failed:
-                        note_action_id = f"note_{str(int(time.time() * 1000))[-8:]}"
-                        pending_actions[note_action_id] = {
-                            "type": "server_note",
-                            "service_name": service_name,
-                        }
                         if get_server_note(service_name) == "没中":
                             note_label = "📝 清除“没中”备注"
-                            note_callback = f"srvnote|clear|{note_action_id}"
+                            note_callback = server_note_callback_data(
+                                "clear", service_name, "finish"
+                            )
                         else:
                             note_label = "📝 标记“没中”"
-                            note_callback = f"srvnote|miss|{note_action_id}"
+                            note_callback = server_note_callback_data(
+                                "miss", service_name, "finish"
+                            )
                         reply_markup = InlineKeyboardMarkup([[
                             InlineKeyboardButton(note_label, callback_data=note_callback)
                         ]])
@@ -2724,7 +2758,9 @@ def run_bot(cfg: dict):
                 }
                 entry_keyboard = [
                     [InlineKeyboardButton(**button) for button in row]
-                    for row in server_list_action_specs(i + 1, action_id, bool(note))
+                    for row in server_list_action_specs(
+                        i + 1, action_id, bool(note), s["name"]
+                    )
                 ]
                 entries.append({"text": "\n".join(entry_lines), "keyboard": entry_keyboard})
 
@@ -3067,6 +3103,39 @@ def run_bot(cfg: dict):
                 parse_mode="Markdown",
                 reply_markup=markup,
             )
+
+        elif parts[0] == "sn":
+            parsed_note = parse_server_note_callback(data)
+            if not parsed_note:
+                await query.message.reply_text("❌ 无效的备注按钮，请重新 /servers")
+                return
+            note_source, note_op, service_name = parsed_note
+            if note_op == "miss":
+                server_notes[service_name] = {
+                    "note": "没中",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                save_server_notes()
+                result_text = f"📝 已为 `{service_name}` 标记：*没中*"
+                next_label = "📝 清除“没中”备注"
+                next_callback = server_note_callback_data(
+                    "clear", service_name, note_source
+                )
+            else:
+                server_notes.pop(service_name, None)
+                save_server_notes()
+                result_text = f"✅ 已清除 `{service_name}` 的“没中”备注"
+                next_label = "📝 标记“没中”"
+                next_callback = server_note_callback_data(
+                    "miss", service_name, note_source
+                )
+
+            if note_source == "finish":
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(next_label, callback_data=next_callback)
+                ]]))
+            else:
+                await query.message.reply_text(result_text, parse_mode="Markdown")
 
         elif parts[0] == "srvnote" and len(parts) >= 3:
             note_op = parts[1]
