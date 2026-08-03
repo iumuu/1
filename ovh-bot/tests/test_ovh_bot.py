@@ -170,6 +170,26 @@ class DiskSelectionTests(unittest.TestCase):
 
         self.assertIs(selected, groups[1])
 
+    def test_no_raid_quick_install_uses_one_default_group(self):
+        groups = [
+            {"diskGroupId": 1, "numberOfDisks": 2, "diskType": "NVME"},
+            {"diskGroupId": 2, "numberOfDisks": 4, "diskType": "HDD"},
+        ]
+
+        selected = bot.select_default_system_group(groups, default_group_id=2)
+
+        self.assertIs(selected, groups[1])
+
+    def test_no_raid_quick_install_falls_back_to_ssd_group(self):
+        groups = [
+            {"diskGroupId": 3, "numberOfDisks": 2, "diskType": "HDD"},
+            {"diskGroupId": 4, "numberOfDisks": 1, "diskType": "SSD"},
+        ]
+
+        selected = bot.select_default_system_group(groups, default_group_id=99)
+
+        self.assertIs(selected, groups[1])
+
     def test_default_ssh_key_prefers_configuration_then_first_key(self):
         self.assertEqual(bot.select_default_ssh_key(["key-a", "key-b"], "key-b"), "key-b")
         self.assertEqual(bot.select_default_ssh_key(["key-a", "key-b"], "missing"), "key-a")
@@ -242,6 +262,18 @@ class ServerPaginationTests(unittest.TestCase):
         ]
         self.assertEqual(selected_callbacks, [
             "srv|quick|srv2_123456",
+            "srv|quick_noraid|srv2_123456",
+            "srv|install|srv2_123456",
+        ])
+
+        no_raid_rows = bot.selected_server_action_specs(
+            "srv2_123456", quick_available=False
+        )
+        no_raid_callbacks = [
+            button["callback_data"] for row in no_raid_rows for button in row
+        ]
+        self.assertEqual(no_raid_callbacks, [
+            "srv|quick_noraid|srv2_123456",
             "srv|install|srv2_123456",
         ])
 
@@ -268,6 +300,51 @@ class ServerPaginationTests(unittest.TestCase):
         self.assertIn("30%", text)
         self.assertIn("读取 OVH SSH 密钥", text)
         self.assertIn("最长等待 20 秒", text)
+
+    def test_existing_os_does_not_finish_new_running_install_task(self):
+        status, percent, done, activity_seen = bot.reconcile_submitted_install_progress(
+            "安装步骤已完成",
+            100,
+            True,
+            "doing",
+            "debian12_64",
+            False,
+        )
+
+        self.assertFalse(done)
+        self.assertLess(percent, 100)
+        self.assertTrue(activity_seen)
+        self.assertIn("doing", status)
+
+    def test_previous_completed_status_waits_for_new_install_activity(self):
+        status, percent, done, activity_seen = bot.reconcile_submitted_install_progress(
+            "安装已结束或 OVH 暂无安装状态",
+            100,
+            True,
+            "",
+            "debian12_64",
+            False,
+        )
+
+        self.assertEqual(status, "等待本次安装任务开始")
+        self.assertEqual(percent, 5)
+        self.assertFalse(done)
+        self.assertFalse(activity_seen)
+
+    def test_new_install_finishes_only_on_its_terminal_task_status(self):
+        status, percent, done, activity_seen = bot.reconcile_submitted_install_progress(
+            "等待下一步",
+            75,
+            False,
+            "done",
+            "debian12_64",
+            True,
+        )
+
+        self.assertTrue(done)
+        self.assertEqual(percent, 100)
+        self.assertTrue(activity_seen)
+        self.assertIn("debian12_64", status)
 
 
 class QuickBuySafetyTests(unittest.TestCase):
