@@ -323,7 +323,7 @@ class ServerPaginationTests(unittest.TestCase):
         self.assertIn("读取 OVH SSH 密钥", text)
         self.assertIn("最长等待 20 秒", text)
 
-    def test_existing_os_does_not_finish_new_running_install_task(self):
+    def test_request_task_activity_does_not_replace_install_activity(self):
         status, percent, done, activity_seen = bot.reconcile_submitted_install_progress(
             "安装步骤已完成",
             100,
@@ -335,7 +335,7 @@ class ServerPaginationTests(unittest.TestCase):
 
         self.assertFalse(done)
         self.assertLess(percent, 100)
-        self.assertTrue(activity_seen)
+        self.assertFalse(activity_seen)
         self.assertIn("doing", status)
 
     def test_previous_completed_status_waits_for_new_install_activity(self):
@@ -343,21 +343,36 @@ class ServerPaginationTests(unittest.TestCase):
             "安装已结束或 OVH 暂无安装状态",
             100,
             True,
-            "",
+            "done",
             "debian12_64",
             False,
         )
 
-        self.assertEqual(status, "等待本次安装任务开始")
+        self.assertEqual(status, "等待本次安装流程开始，重装请求已受理")
         self.assertEqual(percent, 5)
         self.assertFalse(done)
         self.assertFalse(activity_seen)
 
-    def test_new_install_finishes_only_on_its_terminal_task_status(self):
+    def test_request_task_done_does_not_finish_running_install(self):
         status, percent, done, activity_seen = bot.reconcile_submitted_install_progress(
             "等待下一步",
             75,
             False,
+            "done",
+            "debian12_64",
+            True,
+        )
+
+        self.assertFalse(done)
+        self.assertEqual(percent, 75)
+        self.assertTrue(activity_seen)
+        self.assertIn("重装请求已受理", status)
+
+    def test_install_finishes_after_observed_activity_becomes_idle(self):
+        status, percent, done, activity_seen = bot.reconcile_submitted_install_progress(
+            "安装已结束或 OVH 暂无安装状态",
+            100,
+            True,
             "done",
             "debian12_64",
             True,

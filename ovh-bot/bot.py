@@ -626,18 +626,11 @@ def reconcile_submitted_install_progress(
     current_os: str,
     activity_seen: bool,
 ) -> tuple[str, int, bool, bool]:
-    """只允许本次安装任务或本次观察到的安装活动触发完成。"""
+    """必须观察到本次安装先运行再结束，才允许显示完成。"""
     normalized_task = str(task_status or "").strip().lower()
     status_text = str(status_text or "等待 OVH 安装状态")
     percent = max(0, min(100, int(percent)))
 
-    if normalized_task in INSTALL_TASK_SUCCESS_STATES:
-        return (
-            f"安装任务完成，当前系统: {current_os or '待刷新'}",
-            100,
-            True,
-            True,
-        )
     if normalized_task in INSTALL_TASK_FAILURE_STATES:
         return f"安装任务失败: {normalized_task}", 100, True, True
 
@@ -647,20 +640,27 @@ def reconcile_submitted_install_progress(
     if done and install_failed:
         return status_text, 100, True, True
 
-    if normalized_task:
-        activity_seen = True
-        if done:
-            status_text = f"等待本次安装任务执行，OVH 任务状态: {normalized_task}"
-            percent = min(max(percent, 5), 15)
-        else:
-            percent = min(percent, 95)
-        return status_text, percent, False, activity_seen
-
     if not done:
+        if normalized_task in INSTALL_TASK_SUCCESS_STATES:
+            status_text = f"{status_text}（重装请求已受理）"
+        elif normalized_task:
+            status_text = f"{status_text}（OVH 任务: {normalized_task}）"
         return status_text, min(percent, 95), False, True
     if not activity_seen:
-        return "等待本次安装任务开始", 5, False, False
-    return status_text, percent, True, True
+        task_hint = (
+            "，重装请求已受理"
+            if normalized_task in INSTALL_TASK_SUCCESS_STATES
+            else f"，OVH 任务: {normalized_task}"
+            if normalized_task
+            else ""
+        )
+        return f"等待本次安装流程开始{task_hint}", 5, False, False
+    return (
+        f"安装流程完成，当前系统: {current_os or '待刷新'}",
+        100,
+        True,
+        True,
+    )
 
 
 def format_memory(memory: str) -> str:
