@@ -388,6 +388,26 @@ def select_default_raid_group(disk_groups: list, default_group_id=None):
     )[0]
 
 
+def select_default_system_group(disk_groups: list, default_group_id=None):
+    """选择单个系统盘组；优先 OVH 默认组，其次 SSD，且绝不混合磁盘组。"""
+    eligible = [
+        group for group in disk_groups
+        if group.get("diskGroupId") is not None and int(group.get("numberOfDisks") or 0) >= 1
+    ]
+    if not eligible:
+        return None
+    for group in eligible:
+        if str(group.get("diskGroupId")) == str(default_group_id):
+            return group
+    return sorted(
+        eligible,
+        key=lambda group: (
+            0 if classify_disk_group(group)[0] == "ssd" else 1,
+            int(group.get("diskGroupId") or 0),
+        ),
+    )[0]
+
+
 def select_default_ssh_key(keys: list, configured_key: str = ""):
     cleaned = [str(key).strip() for key in keys if str(key).strip()]
     if configured_key and configured_key in cleaned:
@@ -497,6 +517,10 @@ def selected_server_action_specs(action_id: str, quick_available: bool = True) -
             "callback_data": f"srv|quick|{action_id}",
         }])
     rows.append([{
+        "text": "⚡ 一键 Debian 12 + 默认密钥 + 不组 RAID0",
+        "callback_data": f"srv|quick_noraid|{action_id}",
+    }])
+    rows.append([{
         "text": "💿 手动选择系统",
         "callback_data": f"srv|install|{action_id}",
     }])
@@ -561,6 +585,55 @@ def format_quick_install_progress(
     if detail:
         lines.append(f"⏱️ {detail}")
     return "\n".join(lines)
+
+
+INSTALL_TASK_SUCCESS_STATES = {"done", "finished", "completed", "success"}
+INSTALL_TASK_FAILURE_STATES = {"error", "failed", "cancelled", "canceled"}
+
+
+def reconcile_submitted_install_progress(
+    status_text: str,
+    percent: int,
+    done: bool,
+    task_status: str,
+    current_os: str,
+    activity_seen: bool,
+) -> tuple[str, int, bool, bool]:
+    """只允许本次安装任务或本次观察到的安装活动触发完成。"""
+    normalized_task = str(task_status or "").strip().lower()
+    status_text = str(status_text or "等待 OVH 安装状态")
+    percent = max(0, min(100, int(percent)))
+
+    if normalized_task in INSTALL_TASK_SUCCESS_STATES:
+        return (
+            f"安装任务完成，当前系统: {current_os or '待刷新'}",
+            100,
+            True,
+            True,
+        )
+    if normalized_task in INSTALL_TASK_FAILURE_STATES:
+        return f"安装任务失败: {normalized_task}", 100, True, True
+
+    install_failed = any(
+        marker in status_text.lower() for marker in ("fail", "error", "失败")
+    )
+    if done and install_failed:
+        return status_text, 100, True, True
+
+    if normalized_task:
+        activity_seen = True
+        if done:
+            status_text = f"等待本次安装任务执行，OVH 任务状态: {normalized_task}"
+            percent = min(max(percent, 5), 15)
+        else:
+            percent = min(percent, 95)
+        return status_text, percent, False, activity_seen
+
+    if not done:
+        return status_text, min(percent, 95), False, True
+    if not activity_seen:
+        return "等待本次安装任务开始", 5, False, False
+    return status_text, percent, True, True
 
 
 def format_memory(memory: str) -> str:
@@ -2206,6 +2279,7 @@ def run_bot(cfg: dict):
         start_ts = time.time()
         last_text = None
         last_percent = 0
+        task_activity_seen = False
         for _ in range(120):  # 最多跟踪约 40 分钟
             try:
                 elapsed = int(time.time() - start_ts)
@@ -2213,19 +2287,18 @@ def run_bot(cfg: dict):
                 status_text, percent, done = _extract_install_progress(status_obj, elapsed)
                 server_info = await asyncio.to_thread(ovh_client.get_server_info, service_name)
                 current_os = str(server_info.get("os", "")) if isinstance(server_info, dict) else ""
-                template_base = template.split("_")[0]
                 task_info = await asyncio.to_thread(
                     ovh_client.get_server_task, service_name, task_id
                 ) if task_id and task_id != "?" else {}
                 task_status = str(task_info.get("status", "") or task_info.get("state", "")).lower() if isinstance(task_info, dict) else ""
-                if task_status in ("done", "finished", "completed", "success"):
-                    status_text = f"安装任务完成，当前系统: {current_os or '待刷新'}"
-                    percent = 100
-                    done = True
-                elif current_os and (current_os == template or template in current_os or template_base in current_os):
-                    status_text = f"安装完成，当前系统: {current_os}"
-                    percent = 100
-                    done = True
+                status_text, percent, done, task_activity_seen = reconcile_submitted_install_progress(
+                    status_text,
+                    percent,
+                    done,
+                    task_status,
+                    current_os,
+                    task_activity_seen,
+                )
                 percent = max(last_percent, percent)
                 last_percent = percent
                 bar = _progress_bar(percent)
@@ -3056,7 +3129,8 @@ def run_bot(cfg: dict):
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
 
-            elif op == "quick":
+            elif op in ("quick", "quick_noraid"):
+                quick_raid0 = op == "quick"
                 await query.edit_message_text(
                     format_quick_install_progress(
                         service_name,
@@ -3107,7 +3181,7 @@ def run_bot(cfg: dict):
                             f"❌ 一键安装准备超时\n\n服务器: `{service_name}`\n`{exc}`",
                             parse_mode="Markdown",
                             reply_markup=InlineKeyboardMarkup([
-                                [InlineKeyboardButton("🔄 重试一键安装", callback_data=f"srv|quick|{action_id}")],
+                                [InlineKeyboardButton("🔄 重试一键安装", callback_data=f"srv|{op}|{action_id}")],
                                 [InlineKeyboardButton("💿 手动安装", callback_data=f"srv|install|{action_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
                             ]),
                         )
@@ -3125,23 +3199,35 @@ def run_bot(cfg: dict):
                     )
                     return
 
+                disk_mode = "RAID0" if quick_raid0 else "不组 RAID0"
                 await query.edit_message_text(
                     format_quick_install_progress(
                         service_name,
                         action.get("ip", ""),
                         65,
-                        "检查 RAID0 安装盘",
-                        "步骤 3/4 · SSD 与 HDD 分组检查",
+                        f"检查{disk_mode}安装盘",
+                        "步骤 3/4 · SSD 与 HDD 分组选择，绝不混组",
                     ),
                     parse_mode="Markdown",
                 )
-                raid_group = select_default_raid_group(
-                    action.get("disk_groups", []), action.get("default_group")
+                selected_group = (
+                    select_default_raid_group(
+                        action.get("disk_groups", []), action.get("default_group")
+                    )
+                    if quick_raid0
+                    else select_default_system_group(
+                        action.get("disk_groups", []), action.get("default_group")
+                    )
                 )
-                if not raid_group:
+                if not selected_group:
+                    unavailable_reason = (
+                        "没有包含至少 2 块同类型磁盘的独立磁盘组，无法安全创建 RAID0。"
+                        if quick_raid0
+                        else "OVH 没有返回可用的系统安装磁盘组。"
+                    )
                     await query.edit_message_text(
                         f"❌ 一键安装不可用\n\n服务器: `{service_name}`\n"
-                        "没有包含至少 2 块同类型磁盘的独立磁盘组，无法安全创建 RAID0。",
+                        + unavailable_reason,
                         parse_mode="Markdown",
                         reply_markup=InlineKeyboardMarkup([[
                             InlineKeyboardButton("💿 手动安装", callback_data=f"srv|install|{action_id}"),
@@ -3150,9 +3236,11 @@ def run_bot(cfg: dict):
                     )
                     return
 
-                group_id = raid_group["diskGroupId"]
-                raid_disks = int(raid_group.get("numberOfDisks") or 0)
-                raid_text = f"{format_disk_group(raid_group, action.get('default_group'))} · RAID0"
+                group_id = selected_group["diskGroupId"]
+                raid_disks = int(selected_group.get("numberOfDisks") or 0) if quick_raid0 else None
+                raid_text = (
+                    f"{format_disk_group(selected_group, action.get('default_group'))} · {disk_mode}"
+                )
                 confirm_id = str(int(time.time() * 1000))[-10:]
                 pending_actions[confirm_id] = {
                     "type": "reinstall",
@@ -3161,7 +3249,7 @@ def run_bot(cfg: dict):
                     "template": default_template,
                     "hostname": None,
                     "ssh_key_name": default_key,
-                    "raid0": True,
+                    "raid0": quick_raid0,
                     "raid_disks": raid_disks,
                     "disk_group_id": group_id,
                     "data_raid0": False,
@@ -3179,7 +3267,7 @@ def run_bot(cfg: dict):
                     + f"🧩 安装盘: `{raid_text}`\n\n"
                     + f"`{progress_bar_text(100)}` 100%\n"
                     + f"📌 当前步骤: `预设准备完成，等待确认`\n\n"
-                    + f"SSD 与 HDD 不会混组；本次只使用 group={group_id}。\n"
+                    + f"SSD 与 HDD 不会混组；本次只使用 group={group_id}，模式为{disk_mode}。\n"
                     + f"🚨 确认后该组所有数据将被清除！",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
