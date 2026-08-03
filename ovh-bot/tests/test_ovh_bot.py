@@ -250,8 +250,6 @@ class ServerPaginationTests(unittest.TestCase):
         rows = bot.server_list_action_specs(
             2,
             "srv2_123456",
-            has_note=True,
-            service_name="ns123456.ip-192-0-2.eu",
         )
         callbacks = [button["callback_data"] for row in rows for button in row]
         labels = [button["text"] for row in rows for button in row]
@@ -259,9 +257,11 @@ class ServerPaginationTests(unittest.TestCase):
         self.assertEqual(callbacks[0], "srv|select|srv2_123456")
         self.assertIn("选择 2", labels[0])
         self.assertNotIn("srv|quick|srv2_123456", callbacks)
-        self.assertIn("sn|lc|ns123456.ip-192-0-2.eu", callbacks)
+        self.assertNotIn("清除", "".join(labels))
 
-        selected_rows = bot.selected_server_action_specs("srv2_123456")
+        selected_rows = bot.selected_server_action_specs(
+            "srv2_123456", has_note=True
+        )
         selected_callbacks = [
             button["callback_data"] for row in selected_rows for button in row
         ]
@@ -269,6 +269,7 @@ class ServerPaginationTests(unittest.TestCase):
             "srv|quick|srv2_123456",
             "srv|quick_noraid|srv2_123456",
             "srv|install|srv2_123456",
+            "srv|clear_note|srv2_123456",
         ])
 
         no_raid_rows = bot.selected_server_action_specs(

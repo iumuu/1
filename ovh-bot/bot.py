@@ -524,26 +524,19 @@ def parse_server_note_callback(callback_data: str):
 def server_list_action_specs(
     index: int,
     action_id: str,
-    has_note: bool = False,
-    service_name: str = "",
 ) -> list:
-    """服务器列表只负责选中目标，一键安装入口放在选择后的页面。"""
-    rows = [[
+    """服务器总览只保留常用操作，备注管理放在选择后的页面。"""
+    return [[
         {"text": f"🖥️ 选择 {index}", "callback_data": f"srv|select|{action_id}"},
         {"text": f"🔄 重启 {index}", "callback_data": f"srv|reboot|{action_id}"},
     ]]
-    if has_note:
-        rows.append([{
-            "text": f"📝 清除 {index} 的“没中”",
-            "callback_data": (
-                server_note_callback_data("clear", service_name, "list")
-                if service_name else f"srvnote|clear|{action_id}"
-            ),
-        }])
-    return rows
 
 
-def selected_server_action_specs(action_id: str, quick_available: bool = True) -> list:
+def selected_server_action_specs(
+    action_id: str,
+    quick_available: bool = True,
+    has_note: bool = False,
+) -> list:
     """选中服务器后再提供一键安装和手动安装。"""
     rows = []
     if quick_available:
@@ -559,6 +552,11 @@ def selected_server_action_specs(action_id: str, quick_available: bool = True) -
         "text": "💿 手动选择系统",
         "callback_data": f"srv|install|{action_id}",
     }])
+    if has_note:
+        rows.append([{
+            "text": "🗑️ 清除“没中”备注",
+            "callback_data": f"srv|clear_note|{action_id}",
+        }])
     return rows
 
 
@@ -2759,7 +2757,7 @@ def run_bot(cfg: dict):
                 entry_keyboard = [
                     [InlineKeyboardButton(**button) for button in row]
                     for row in server_list_action_specs(
-                        i + 1, action_id, bool(note), s["name"]
+                        i + 1, action_id
                     )
                 ]
                 entries.append({"text": "\n".join(entry_lines), "keyboard": entry_keyboard})
@@ -3187,6 +3185,7 @@ def run_bot(cfg: dict):
                         bool(select_default_raid_group(
                             action.get("disk_groups", []), action.get("default_group")
                         )),
+                        get_server_note(service_name) == "没中",
                     )
                 ]
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
@@ -3196,6 +3195,20 @@ def run_bot(cfg: dict):
                     + "\n\n请选择安装方式：",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+            elif op == "clear_note":
+                server_notes.pop(service_name, None)
+                save_server_notes()
+                await query.edit_message_text(
+                    f"✅ 已清除 `{service_name}` 的“没中”备注",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "↩️ 返回服务器操作",
+                            callback_data=f"srv|select|{action_id}",
+                        )
+                    ]]),
                 )
 
             elif op in ("quick", "quick_noraid"):
