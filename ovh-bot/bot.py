@@ -640,6 +640,19 @@ def format_quick_install_progress(
     return "\n".join(lines)
 
 
+def parse_running_reinstall_task(error) -> tuple[str, str] | None:
+    """解析 OVH“已有重装任务”错误，返回 (task_id, status)。"""
+    text = str(error or "")
+    match = re.search(
+        r"Task\s+(\d+)\s+of\s+type\s+reinstallServer\s+with\s+status\s+([a-zA-Z_]+)\s+is\s+already\s+running",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group(1), match.group(2).lower()
+
+
 INSTALL_TASK_SUCCESS_STATES = {"done", "finished", "completed", "success"}
 INSTALL_TASK_FAILURE_STATES = {"error", "failed", "cancelled", "canceled"}
 
@@ -4432,15 +4445,46 @@ def run_bot(cfg: dict):
                         )
                     )
                 except Exception as e:
-                    pending_actions[action_id] = action
-                    await query.edit_message_text(
-                        f"❌ 安装请求失败: `{e}`\n\n可确认重试，或取消后重新 /servers。",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton("🔄 重试安装", callback_data=f"act|{action_id}"),
-                            InlineKeyboardButton("取消", callback_data="cancel"),
-                        ]]),
-                    )
+                    running_task = parse_running_reinstall_task(e)
+                    if running_task:
+                        running_task_id, running_status = running_task
+                        raid_text = action.get("raid_text") or (
+                            f"RAID0 group={disk_group_id}"
+                            if raid0 else
+                            f"系统盘 group={disk_group_id} / 无 RAID0"
+                            if disk_group_id is not None else
+                            "默认分区 / 无 RAID"
+                        )
+                        await query.edit_message_text(
+                            f"💿 *已接管正在运行的安装任务*\n\n"
+                            f"🖥️ 服务器: `{service_name}`\n"
+                            + (f"🌐 IP: `{ip_address}`\n" if ip_address else "")
+                            + f"💿 系统: `{template}`\n"
+                            + (f"🔑 SSH密钥: `{ssh_key_name}`\n" if ssh_key_name else "")
+                            + f"🧩 磁盘: `{raid_text}`\n"
+                            + f"📋 任务ID: `{running_task_id}`\n\n"
+                            + f"`█░░░░░░░░░░░` 5%\n"
+                            + f"📌 状态: `OVH 任务 {running_status}`\n"
+                            + f"⏳ Bot 会自动刷新此进度。",
+                            parse_mode="Markdown",
+                        )
+                        asyncio.ensure_future(
+                            track_install_progress(
+                                query.message, service_name, template,
+                                running_task_id, ssh_key_name, raid_text,
+                                None, ip_address,
+                            )
+                        )
+                    else:
+                        pending_actions[action_id] = action
+                        await query.edit_message_text(
+                            f"❌ 安装请求失败: `{e}`\n\n可确认重试，或取消后重新 /servers。",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("🔄 重试安装", callback_data=f"act|{action_id}"),
+                                InlineKeyboardButton("取消", callback_data="cancel"),
+                            ]]),
+                        )
 
             elif action["type"] == "reboot":
                 service_name = action["service_name"]

@@ -212,6 +212,17 @@ class DiskSelectionTests(unittest.TestCase):
 
 
 class ServerPaginationTests(unittest.TestCase):
+    def test_running_reinstall_error_is_parsed_for_progress_takeover(self):
+        error = (
+            "Task 555524320 of type reinstallServer with status todo "
+            "is already running on server ns3198824.ip-198-244-164.eu"
+        )
+        self.assertEqual(
+            bot.parse_running_reinstall_task(error),
+            ("555524320", "todo"),
+        )
+        self.assertIsNone(bot.parse_running_reinstall_task("unrelated error"))
+
     def test_servers_are_sorted_by_creation_time_newest_first(self):
         servers = [
             {"name": "ns300", "created_at": "2026-01-01T00:00:00+00:00"},
