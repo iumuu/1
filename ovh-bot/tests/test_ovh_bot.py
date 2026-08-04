@@ -212,6 +212,24 @@ class DiskSelectionTests(unittest.TestCase):
 
 
 class ServerPaginationTests(unittest.TestCase):
+    def test_servers_are_sorted_by_creation_time_newest_first(self):
+        servers = [
+            {"name": "ns300", "created_at": "2026-01-01T00:00:00+00:00"},
+            {"name": "ns100", "created_at": "2026-03-01T00:00:00+00:00"},
+            {"name": "ns200", "created_at": "2026-02-01T00:00:00+00:00"},
+        ]
+        ordered = bot.sort_servers_newest_first(servers)
+        self.assertEqual([item["name"] for item in ordered], ["ns100", "ns200", "ns300"])
+
+    def test_servers_without_creation_time_use_name_number_fallback(self):
+        servers = [
+            {"name": "ns100", "created_at": ""},
+            {"name": "ns300", "created_at": ""},
+            {"name": "ns200", "created_at": ""},
+        ]
+        ordered = bot.sort_servers_newest_first(servers)
+        self.assertEqual([item["name"] for item in ordered], ["ns300", "ns200", "ns100"])
+
     def test_servers_listing_does_not_use_install_api_timeout(self):
         source = Path(bot.__file__).read_text(encoding="utf-8")
         servers_start = source.index("    async def servers_cmd")

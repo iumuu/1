@@ -415,6 +415,27 @@ def select_default_ssh_key(keys: list, configured_key: str = ""):
     return cleaned[0] if cleaned else None
 
 
+def server_creation_sort_key(server: dict) -> tuple:
+    """按 OVH 服务创建时间排序；缺少时间时用服务器名称数字稳定兜底。"""
+    raw_creation = str(server.get("created_at", "") or "").strip()
+    creation_ts = 0.0
+    if raw_creation:
+        try:
+            creation_ts = datetime.fromisoformat(
+                raw_creation.replace("Z", "+00:00")
+            ).timestamp()
+        except (TypeError, ValueError):
+            creation_ts = 0.0
+    name_numbers = re.findall(r"\d+", str(server.get("name", "")))
+    name_number = int(name_numbers[0]) if name_numbers else 0
+    return creation_ts, name_number, str(server.get("name", ""))
+
+
+def sort_servers_newest_first(servers: list) -> list:
+    """最新添加的 OVH 服务器排在最前面。"""
+    return sorted(servers, key=server_creation_sort_key, reverse=True)
+
+
 def extract_installable_disk_groups(hardware: dict) -> list:
     """只保留 OVH 返回的有效物理磁盘组；无磁盘的暂停/删机服务会被过滤。"""
     if not isinstance(hardware, dict):
@@ -1278,6 +1299,10 @@ class OVHClient:
             for name in names:
                 try:
                     info = self.get(f"/dedicated/server/{name}")
+                    try:
+                        service_info = self.get(f"/dedicated/server/{name}/serviceInfos")
+                    except Exception:
+                        service_info = {}
                     result.append({
                         "name": name,
                         "commercial_range": info.get("commercialRange", ""),
@@ -1288,10 +1313,11 @@ class OVHClient:
                         "ip": info.get("ip", ""),
                         "reverse": info.get("reverse", ""),
                         "monitoring": info.get("monitoring"),
+                        "created_at": service_info.get("creation", "") if isinstance(service_info, dict) else "",
                     })
                 except Exception:
-                    result.append({"name": name, "commercial_range": "?", "os": "?", "state": "?"})
-            return result
+                    result.append({"name": name, "commercial_range": "?", "os": "?", "state": "?", "created_at": ""})
+            return sort_servers_newest_first(result)
         except Exception:
             return []
 
