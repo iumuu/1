@@ -416,7 +416,7 @@ def select_default_ssh_key(keys: list, configured_key: str = ""):
 
 
 def server_creation_sort_key(server: dict) -> tuple:
-    """按 OVH 服务创建时间排序；缺少时间时用服务器名称数字稳定兜底。"""
+    """创建日期新的优先；同日按 OVH 原始列表追加顺序，最新追加的优先。"""
     raw_creation = str(server.get("created_at", "") or "").strip()
     creation_ts = 0.0
     if raw_creation:
@@ -426,13 +426,14 @@ def server_creation_sort_key(server: dict) -> tuple:
             ).timestamp()
         except (TypeError, ValueError):
             creation_ts = 0.0
+    source_index = int(server.get("_source_index", -1) or -1)
     name_numbers = re.findall(r"\d+", str(server.get("name", "")))
     name_number = int(name_numbers[0]) if name_numbers else 0
-    return creation_ts, name_number, str(server.get("name", ""))
+    return creation_ts, source_index, name_number, str(server.get("name", ""))
 
 
 def sort_servers_newest_first(servers: list) -> list:
-    """最新添加的 OVH 服务器排在最前面。"""
+    """最新发货服务器排第 1，原有服务器依次顺延。"""
     return sorted(servers, key=server_creation_sort_key, reverse=True)
 
 
@@ -1309,7 +1310,7 @@ class OVHClient:
         try:
             names = self.get("/dedicated/server")
             result = []
-            for name in names:
+            for source_index, name in enumerate(names):
                 try:
                     info = self.get(f"/dedicated/server/{name}")
                     try:
@@ -1327,9 +1328,10 @@ class OVHClient:
                         "reverse": info.get("reverse", ""),
                         "monitoring": info.get("monitoring"),
                         "created_at": service_info.get("creation", "") if isinstance(service_info, dict) else "",
+                        "_source_index": source_index,
                     })
                 except Exception:
-                    result.append({"name": name, "commercial_range": "?", "os": "?", "state": "?", "created_at": ""})
+                    result.append({"name": name, "commercial_range": "?", "os": "?", "state": "?", "created_at": "", "_source_index": source_index})
             return sort_servers_newest_first(result)
         except Exception:
             return []
