@@ -1867,12 +1867,12 @@ def run_bot(cfg: dict):
         await update.message.reply_text(
             "🤖 *OVH 抢购 Bot 已就绪*\n\n"
             "常用入口:\n"
-            "🛒 /buy `型号` - 只显示当前有货配置，按钮抢购\n"
-            "📡 /watch `型号` - 显示全部配置，按钮设置监控\n"
-            "📋 /watchlist - 查看、暂停、启用、删除监控\n"
-            "💳 /status - 查看最近订单\n"
-            "🖥️ /servers - 服务器列表、重装、重启\n\n"
-            "输入 /help 查看完整说明。\n"
+            "🛒 `/buy 型号` - 只显示当前有货配置，按钮抢购\n"
+            "📡 `/watch 型号` - 显示全部配置，按钮设置监控\n"
+            "📋 `/watchlist` - 查看、暂停、启用、删除监控\n"
+            "💳 `/status` - 查看最近订单\n"
+            "🖥️ `/servers` - 服务器列表、重装、重启\n\n"
+            "输入 `/help` 查看完整说明。\n"
             f"🌐 当前区域: `{ovh_client.zone}` / `{ovh_client.subsidiary}`",
             parse_mode="Markdown",
         )
@@ -1883,32 +1883,32 @@ def run_bot(cfg: dict):
         await update.message.reply_text(
             "📖 *OVH Bot 帮助*\n\n"
             "🛒 *抢购*\n"
-            "/buy `型号`\n"
+            "`/buy 型号`\n"
             "只列出当前有货的配置和机房，按按钮选择配置、机房、数量后下单。\n\n"
-            "/check `型号`\n"
+            "`/check 型号`\n"
             "查看该型号全部配置、全部机房的库存状态。\n\n"
             "📡 *监控*\n"
-            "/watch `型号`\n"
+            "`/watch 型号`\n"
             "列出全部配置，包括当前无货配置；按按钮选择配置、机房、下单上限。\n\n"
-            "/watchlist\n"
+            "`/watchlist`\n"
             "查看监控进度，并可按钮暂停、启用、删除任务。已达上限的任务重新启用会自动重置进度。\n\n"
-            "/unwatch `型号`\n"
+            "`/unwatch 型号`\n"
             "删除指定监控；不带型号时删除全部监控。\n\n"
             "💳 *订单*\n"
-            "/status\n"
+            "`/status`\n"
             "查看最近订单，支持翻页。\n\n"
-            "/status `订单号`\n"
+            "`/status 订单号`\n"
             "查看订单详情、状态、价格和待付款链接。\n\n"
-            "/pay `订单号`\n"
+            "`/pay 订单号`\n"
             "获取指定订单付款链接。\n\n"
             "🖥️ *服务器*\n"
-            "/servers\n"
+            "`/servers`\n"
             "查看服务器和可复制 IP；支持一键 Debian 12 + 默认密钥 + 单组 RAID0、"
             "手动重装、重启和“没中”备注。\n\n"
-            "/keys\n"
+            "`/keys`\n"
             "查看 OVH 账户里的预设 SSH 密钥。\n\n"
             "📦 *目录*\n"
-            "/catalog\n"
+            "`/catalog`\n"
             "查看服务器目录。\n\n"
             "💡 多数流程支持按钮返回上一步，取消会直接删除当前菜单消息。\n"
             f"🌐 当前区域: `{ovh_client.zone}` / `{ovh_client.subsidiary}`",
@@ -1922,9 +1922,10 @@ def run_bot(cfg: dict):
 
         if not context.args:
             await update.message.reply_text(
-                "用法: /buy <planCode>\n\n"
-                "示例: /buy ks-1-b\n\n"
-                "然后用按钮选择配置和机房。"
+                "用法: `/buy <planCode>`\n\n"
+                "示例: `/buy ks-1-b`\n\n"
+                "然后用按钮选择配置和机房。",
+                parse_mode="Markdown",
             )
             return
 
@@ -1947,7 +1948,7 @@ def run_bot(cfg: dict):
         if not available_cfgs:
             await msg.edit_text(
                 f"❌ `{plan_code}` 当前没有任何有货配置，无法抢购。\n\n"
-                f"💡 请用 /watch 先设定监控，等有货后自动下单。",
+                f"💡 请用 `/watch` 先设定监控，等有货后自动下单。",
                 parse_mode="Markdown"
             )
             return
@@ -1980,7 +1981,10 @@ def run_bot(cfg: dict):
             return
 
         if not context.args:
-            await update.message.reply_text("用法: /check <planCode>\n示例: /check ks-1-b")
+            await update.message.reply_text(
+                "用法: `/check <planCode>`\n示例: `/check ks-1-b`",
+                parse_mode="Markdown",
+            )
             return
 
         plan_code = resolve_plan_code(context.args[0])
@@ -2471,9 +2475,10 @@ def run_bot(cfg: dict):
 
         if not context.args:
             await update.message.reply_text(
-                "用法: /watch <planCode>\n\n"
-                "示例: /watch ks-1-b\n\n"
-                "然后用按钮选择配置和机房"
+                "用法: `/watch <planCode>`\n\n"
+                "示例: `/watch ks-1-b`\n\n"
+                "然后用按钮选择配置和机房",
+                parse_mode="Markdown",
             )
             return
 
@@ -2555,7 +2560,10 @@ def run_bot(cfg: dict):
             return
 
         if not watch_tasks:
-            await update.message.reply_text("📭 当前没有监控任务\n\n用 /watch <planCode> 开始监控")
+            await update.message.reply_text(
+                "📭 当前没有监控任务\n\n用 `/watch <planCode>` 开始监控",
+                parse_mode="Markdown",
+            )
             return
 
         text = "📡 *当前监控列表*\n\n"
@@ -2621,7 +2629,9 @@ def run_bot(cfg: dict):
         if not check_user(update.effective_user.id):
             return
         if not context.args:
-            await update.message.reply_text("用法: /pay <orderId>")
+            await update.message.reply_text(
+                "用法: `/pay <orderId>`", parse_mode="Markdown"
+            )
             return
 
         try:
@@ -2691,7 +2701,10 @@ def run_bot(cfg: dict):
         try:
             order_id = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("❌ 订单号必须是数字\n用法: /status 254452143")
+            await update.message.reply_text(
+                "❌ 订单号必须是数字\n用法: `/status 254452143`",
+                parse_mode="Markdown",
+            )
             return
 
         try:
@@ -3009,7 +3022,10 @@ def run_bot(cfg: dict):
             return
 
         if not context.args:
-            await update.message.reply_text("用法: /reboot <序号或名称>\n先 /servers 查看列表")
+            await update.message.reply_text(
+                "用法: `/reboot <序号或名称>`\n先用 `/servers` 查看列表",
+                parse_mode="Markdown",
+            )
             return
 
         servers = await asyncio.to_thread(ovh_client.list_servers)
@@ -4325,7 +4341,7 @@ def run_bot(cfg: dict):
                         f"📦 型号: `{plan_code}`\n"
                         f"💾 配置: {cfg_mem} + {cfg_stor}\n"
                         f"📍 机房: {dc_display}\n\n"
-                        f"💡 请用 /watch 设定监控，等有货后自动下单",
+                        f"💡 请用 `/watch` 设定监控，等有货后自动下单",
                         parse_mode="Markdown"
                     )
                     return

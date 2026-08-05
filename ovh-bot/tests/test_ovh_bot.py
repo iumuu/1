@@ -615,6 +615,13 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn("请直接发送要下单的数量", source)
         self.assertNotIn('callback_data=f"watch|count|{session_id}|1"', source)
 
+    def test_slash_command_hints_use_copyable_monospace(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('"用法: `/watch <planCode>`', source)
+        self.assertIn('"示例: `/watch ks-1-b`', source)
+        self.assertIn('"用法: `/buy <planCode>`', source)
+        self.assertIn('示例: `/check ks-1-b`', source)
+
     def test_slash_command_messages_are_deleted(self):
         source = Path(bot.__file__).read_text(encoding="utf-8")
         self.assertIn("async def delete_command_message", source)
