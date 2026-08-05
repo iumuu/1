@@ -232,6 +232,20 @@ class ServerPaginationTests(unittest.TestCase):
         ordered = bot.sort_servers_newest_first(servers)
         self.assertEqual([item["name"] for item in ordered], ["ns100", "ns200", "ns300"])
 
+    def test_exact_service_creation_time_wins_within_same_day(self):
+        servers = [
+            {
+                "name": "older-high-source-index", "created_at": "2026-08-05",
+                "exact_created_at": "2026-08-05T10:04:47Z", "_source_index": 99,
+            },
+            {
+                "name": "newer-low-source-index", "created_at": "2026-08-05",
+                "exact_created_at": "2026-08-05T16:01:38Z", "_source_index": 1,
+            },
+        ]
+        ordered = bot.sort_servers_newest_first(servers)
+        self.assertEqual(ordered[0]["name"], "newer-low-source-index")
+
     def test_same_day_servers_use_latest_source_position_first(self):
         servers = [
             {"name": "ns900", "created_at": "2026-08-04", "_source_index": 0},

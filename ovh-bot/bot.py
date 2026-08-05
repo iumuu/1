@@ -416,8 +416,10 @@ def select_default_ssh_key(keys: list, configured_key: str = ""):
 
 
 def server_creation_sort_key(server: dict) -> tuple:
-    """创建日期新的优先；同日按 OVH 原始列表追加顺序，最新追加的优先。"""
-    raw_creation = str(server.get("created_at", "") or "").strip()
+    """优先使用新版服务 API 的秒级创建时间，再回退日期和原始顺序。"""
+    raw_creation = str(
+        server.get("exact_created_at") or server.get("created_at", "") or ""
+    ).strip()
     creation_ts = 0.0
     if raw_creation:
         try:
@@ -1374,10 +1376,32 @@ class OVHClient:
                         "reverse": info.get("reverse", ""),
                         "monitoring": info.get("monitoring"),
                         "created_at": service_info.get("creation", "") if isinstance(service_info, dict) else "",
+                        "service_id": service_info.get("serviceId") if isinstance(service_info, dict) else None,
                         "_source_index": source_index,
                     })
                 except Exception:
                     result.append({"name": name, "commercial_range": "?", "os": "?", "state": "?", "created_at": "", "_source_index": source_index})
+            if result:
+                newest_date = max(
+                    (str(server.get("created_at", "") or "") for server in result),
+                    default="",
+                )
+                for server in result:
+                    if not newest_date or server.get("created_at") != newest_date:
+                        continue
+                    service_id = server.get("service_id")
+                    if not service_id:
+                        continue
+                    try:
+                        service = self.get(f"/services/{service_id}")
+                        server["exact_created_at"] = (
+                            service.get("billing", {})
+                            .get("lifecycle", {})
+                            .get("current", {})
+                            .get("creationDate", "")
+                        )
+                    except Exception as exc:
+                        logger.warning(f"读取 {server.get('name')} 精确创建时间失败: {exc}")
             return sort_servers_newest_first(result)
         except Exception:
             return []
