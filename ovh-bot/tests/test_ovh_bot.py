@@ -434,30 +434,43 @@ class ServerPaginationTests(unittest.TestCase):
 
 
 class QuickBuySafetyTests(unittest.TestCase):
-    def test_config_price_can_return_without_tax(self):
+    def test_config_price_can_return_monthly_and_installation_breakdown(self):
         client = bot.OVHClient({"ovh": {}})
         client.create_cart = lambda: {"cartId": "cart-1"}
         client.delete_cart = lambda cart_id: None
         client._find_addon_options = lambda *args: []
-        client.post = lambda path, **kwargs: {"itemId": 1}
-        client.get = lambda path, **kwargs: {
-            "prices": {
-                "withTax": {"value": 37.98, "currencyCode": "EUR"},
-                "withoutTax": {"value": 31.65, "currencyCode": "EUR"},
-            }
+        client.get_catalog = lambda category: {"plans": [{
+            "planCode": "24sk202",
+            "pricings": [{
+                "mode": "default", "capacities": ["installation"], "phase": 0,
+                "price": 3799000000, "formattedPrice": "€ 37.99",
+            }],
+        }]}
+        client.post = lambda path, **kwargs: {
+            "itemId": 1,
+            "prices": [{"label": "TOTAL", "price": {
+                "value": 37.99, "currencyCode": "EUR"
+            }}],
         }
+        client.get = lambda path, **kwargs: {"prices": {}}
 
-        price = client.get_config_price(
-            "24sk202", "fra", "ram-32g", "softraid-2x450nvme", include_tax=False
+        prices = client.get_config_price(
+            "24sk202", "fra", "ram-32g", "softraid-2x450nvme",
+            include_tax=False, breakdown=True,
         )
 
-        self.assertEqual(price, "31.65 EUR")
+        self.assertEqual(prices["monthly"], 37.99)
+        self.assertEqual(prices["installation"], 37.99)
+        self.assertEqual(prices["currency"], "EUR")
 
-    def test_watch_flow_displays_untaxed_price(self):
+    def test_watch_flow_displays_price_breakdown_and_field_icons(self):
         source = Path(bot.__file__).read_text(encoding="utf-8")
-        self.assertIn("💰 未税价格:", source)
-        self.assertIn("（不含税）", source)
-        self.assertIn("include_tax: bool = True", source)
+        self.assertIn("💰 价格:", source)
+        self.assertIn("🔧 安装费:", source)
+        self.assertIn("(一次性)", source)
+        self.assertIn("📦 型号:", source)
+        self.assertIn("💾 配置:", source)
+        self.assertIn("📍 机房:", source)
 
     def test_batch_count_is_honored_and_stops_on_first_failure(self):
         results = [buy_result(True), buy_result(False, "sold out"), buy_result(True)]

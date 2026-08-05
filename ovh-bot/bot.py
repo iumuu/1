@@ -970,9 +970,24 @@ class OVHClient:
             return {}
 
     def get_config_price(self, plan_code: str, datacenter: str,
-                         memory: str, storage: str, include_tax: bool = True) -> str:
-        """通过临时购物车获取配置价格；include_tax=False 返回未税价格。"""
+                         memory: str, storage: str, include_tax: bool = True,
+                         breakdown: bool = False):
+        """获取配置价格；breakdown=True 返回未税月费和一次性安装费。"""
         cart_id = None
+        monthly_value = 0.0
+        currency = "EUR"
+
+        def add_item_total(item: dict):
+            nonlocal monthly_value, currency
+            for entry in (item or {}).get("prices", []):
+                if entry.get("label") != "TOTAL":
+                    continue
+                price = entry.get("price", {})
+                value = price.get("value")
+                if isinstance(value, (int, float)):
+                    monthly_value += float(value)
+                currency = price.get("currencyCode", currency)
+
         try:
             # 创建购物车
             cart = self.create_cart()
@@ -987,6 +1002,7 @@ class OVHClient:
                 quantity=1,
             )
             item_id = item_result["itemId"]
+            add_item_total(item_result)
 
             # 设置数据中心区域
             region = get_region_for_dc(datacenter)
@@ -1019,7 +1035,7 @@ class OVHClient:
                         for avail in available_opts:
                             if avail.get("planCode") == wanted:
                                 try:
-                                    self.post(
+                                    option_item = self.post(
                                         f"/order/cart/{cart_id}/eco/options",
                                         itemId=item_id,
                                         planCode=wanted,
@@ -1027,13 +1043,41 @@ class OVHClient:
                                         pricingMode=avail.get("pricingMode", "default"),
                                         quantity=1,
                                     )
+                                    add_item_total(option_item)
                                 except Exception:
                                     pass
                                 break
                 except Exception:
                     pass
 
-            # 获取价格
+            if breakdown:
+                installation_value = 0.0
+                catalog = self.get_catalog("eco")
+                for plan in catalog.get("plans", []):
+                    if plan.get("planCode") != plan_code:
+                        continue
+                    for pricing in plan.get("pricings", []):
+                        if (
+                            pricing.get("mode") == "default"
+                            and pricing.get("capacities") == ["installation"]
+                            and pricing.get("phase") == 0
+                        ):
+                            raw = pricing.get("price", 0)
+                            installation_value = float(raw) / 100000000 if raw else 0.0
+                            formatted = pricing.get("formattedPrice", "")
+                            if formatted.startswith("$"):
+                                currency = "USD"
+                            elif "€" in formatted:
+                                currency = "EUR"
+                            break
+                    break
+                return {
+                    "monthly": monthly_value,
+                    "installation": installation_value,
+                    "currency": currency,
+                }
+
+            # 兼容原调用：返回购物车首期总价。
             summary = self.get(f"/order/cart/{cart_id}/summary")
             prices = summary.get("prices", {})
             price_key = "withTax" if include_tax else "withoutTax"
@@ -1042,10 +1086,9 @@ class OVHClient:
             currency = price_data.get("currencyCode", "EUR") if isinstance(price_data, dict) else "EUR"
 
             if price_value is not None:
-                # 转换为可读格式
                 if isinstance(price_value, (int, float)):
                     if price_value > 100000:
-                        price_value = price_value / 100000000  # OVH 返回的是纳单位
+                        price_value = price_value / 100000000
                     return f"{price_value:.2f} {currency}"
                 return str(price_value)
             return ""
@@ -3105,10 +3148,18 @@ def run_bot(cfg: dict):
         if target_dc not in cache:
             cache[target_dc] = await asyncio.to_thread(
                 ovh_client.get_config_price,
-                session["plan_code"], target_dc, cfg.get("memory"), cfg.get("storage"), False,
+                session["plan_code"], target_dc, cfg.get("memory"), cfg.get("storage"), False, True,
             )
-        price = cache.get(target_dc, "")
-        return f"\n💰 未税价格: {price}（不含税）" if price else ""
+        prices = cache.get(target_dc)
+        if not isinstance(prices, dict):
+            return ""
+        symbol = "€" if prices.get("currency") == "EUR" else "$" if prices.get("currency") == "USD" else f"{prices.get('currency', 'EUR')} "
+        monthly = float(prices.get("monthly", 0) or 0)
+        installation = float(prices.get("installation", 0) or 0)
+        return (
+            f"\n💰 价格: {symbol}{monthly:.2f}/月\n"
+            f"🔧 安装费: {symbol}{installation:.2f} (一次性)"
+        )
 
     async def show_watch_count_prompt(query, context, session_id: str, back_callback: str):
         """提示用户直接发送 /watch 的下单数量。"""
@@ -3120,9 +3171,9 @@ def run_bot(cfg: dict):
         dc = session.get("selected_dc")
         dc_display = "全部机房" if dc is None else format_dc(dc)
         await query.edit_message_text(
-            f"⏳ 正在查询所选配置的未税价格...\n\n"
-            f"型号: `{session['plan_code']}`\n"
-            f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+            f"⏳ 正在查询所选配置价格...\n\n"
+            f"📦 型号: `{session['plan_code']}`\n"
+            f"💾 配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
             parse_mode="Markdown",
         )
         price_line = await get_watch_untaxed_price_line(session, dc)
@@ -3132,9 +3183,9 @@ def run_bot(cfg: dict):
         }
         await query.edit_message_text(
             f"🎯 设置下单数量\n\n"
-            f"型号: `{session['plan_code']}`\n"
-            f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-            f"机房: {dc_display}"
+            f"📦 型号: `{session['plan_code']}`\n"
+            f"💾 配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+            f"📍 机房: {dc_display}"
             f"{price_line}\n\n"
             f"请直接发送要下单的数量，例如：`5`\n"
             f"可设置范围：1–100 单",
@@ -3854,9 +3905,9 @@ def run_bot(cfg: dict):
                 ])
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
                 await query.edit_message_text(
-                    f"⏳ 正在查询所选配置的未税价格...\n\n"
-                    f"型号: `{plan_code}`\n"
-                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    f"⏳ 正在查询所选配置价格...\n\n"
+                    f"📦 型号: `{plan_code}`\n"
+                    f"💾 配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
                     parse_mode="Markdown",
                 )
                 price_line = await get_watch_untaxed_price_line(session)
@@ -3932,10 +3983,10 @@ def run_bot(cfg: dict):
                 ])
                 await query.edit_message_text(
                     f"⚙️ 选择监控模式\n\n"
-                    f"型号: `{plan_code}`\n"
-                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc_display}\n"
-                    f"下单上限: {session.get('max_orders', 1)}",
+                    f"📦 型号: `{plan_code}`\n"
+                    f"💾 配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"📍 机房: {dc_display}\n"
+                    f"🎯 下单上限: {session.get('max_orders', 1)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
                 )
@@ -3968,12 +4019,12 @@ def run_bot(cfg: dict):
                 ])
                 await query.edit_message_text(
                     f"📡 确认开始监控\n\n"
-                    f"型号: `{plan_code}`\n"
-                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc_display}"
+                    f"📦 型号: `{plan_code}`\n"
+                    f"💾 配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"📍 机房: {dc_display}"
                     f"{price_line}\n"
-                    f"模式: {watch_mode_label({'auto_buy': auto_buy})}\n"
-                    f"下单上限: {session.get('max_orders', 1)}",
+                    f"⚙️ 模式: {watch_mode_label({'auto_buy': auto_buy})}\n"
+                    f"🎯 下单上限: {session.get('max_orders', 1)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
                 )
@@ -4042,7 +4093,7 @@ def run_bot(cfg: dict):
                 await query.edit_message_text(
                     f"⚙️ 管理监控任务\n\n"
                     f"{status} `{plan_code}`\n"
-                    f"模式: {watch_mode_label(task)}\n"
+                    f"⚙️ 模式: {watch_mode_label(task)}\n"
                     f"条件: {', '.join(filter_parts)}\n"
                     f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
                     parse_mode="Markdown",
@@ -4062,7 +4113,7 @@ def run_bot(cfg: dict):
                 }
                 await query.edit_message_text(
                     f"🎯 重新设置下单数量\n\n"
-                    f"型号: `{plan_code}`\n"
+                    f"📦 型号: `{plan_code}`\n"
                     f"本轮进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单\n\n"
                     f"请直接发送新的下单数量。\n"
                     f"例如要从现在重新下 5 单，就发送：`5`\n"
@@ -4128,7 +4179,7 @@ def run_bot(cfg: dict):
                 await query.edit_message_text(
                     f"⚙️ 管理监控任务\n\n"
                     f"{status} `{plan_code}`\n"
-                    f"模式: {watch_mode_label(task)}\n"
+                    f"⚙️ 模式: {watch_mode_label(task)}\n"
                     f"条件: {', '.join(filter_parts)}\n"
                     f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
                     parse_mode="Markdown",
@@ -4177,7 +4228,7 @@ def run_bot(cfg: dict):
                 await query.edit_message_text(
                     f"⚙️ 管理监控任务\n\n"
                     f"{status} `{plan_code}`\n"
-                    f"模式: {watch_mode_label(task)}\n"
+                    f"⚙️ 模式: {watch_mode_label(task)}\n"
                     f"条件: {', '.join(filter_parts)}\n"
                     f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
                     parse_mode="Markdown",
@@ -4328,9 +4379,9 @@ def run_bot(cfg: dict):
                 ]
                 await query.edit_message_text(
                     f"🎯 选择下单数量\n\n"
-                    f"型号: `{plan_code}`\n"
-                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc_display}",
+                    f"📦 型号: `{plan_code}`\n"
+                    f"💾 配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"📍 机房: {dc_display}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -4360,9 +4411,9 @@ def run_bot(cfg: dict):
                 ])
                 await query.edit_message_text(
                     f"🛒 确认开始抢购\n\n"
-                    f"型号: `{plan_code}`\n"
-                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc_display}\n"
+                    f"📦 型号: `{plan_code}`\n"
+                    f"💾 配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                    f"📍 机房: {dc_display}\n"
                     f"下单数量: {session.get('count', 1)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
@@ -4672,11 +4723,11 @@ def run_bot(cfg: dict):
             ])
             result_text = (
                 f"⚙️ 选择监控模式\n\n"
-                f"型号: `{session['plan_code']}`\n"
-                f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                f"机房: {dc_display}"
+                f"📦 型号: `{session['plan_code']}`\n"
+                f"💾 配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                f"📍 机房: {dc_display}"
                 f"{price_line}\n"
-                f"下单数量: {session['max_orders']}"
+                f"🎯 下单数量: {session['max_orders']}"
             )
             prompt_message = create_count.get("message")
             try:
@@ -4748,7 +4799,7 @@ def run_bot(cfg: dict):
                 f"✅ 已重新设置下单数量：{task['max_orders']} 单\n"
                 f"本轮进度已重置为 0/{task['max_orders']}\n\n"
                 f"⚙️ 管理监控任务\n\n{status} `{plan_code}`\n"
-                f"模式: {watch_mode_label(task)}\n"
+                f"⚙️ 模式: {watch_mode_label(task)}\n"
                 f"条件: {', '.join(filter_parts)}\n"
                 f"进度: {task.get('ordered', 0)}/{task['max_orders']} 单"
             )
