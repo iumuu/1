@@ -811,11 +811,9 @@ def watch_mode_label(task: dict) -> str:
     return "🚀 自动下单" if watch_auto_buy_enabled(task) else "🔔 仅通知"
 
 
-def watch_max_orders_after_additional(task: dict, additional: int) -> int:
-    """按“从现在起再下几单”计算新的累计下单上限。"""
-    ordered = max(0, int(task.get("ordered", 0) or 0))
-    additional = max(1, min(int(additional), 100))
-    return ordered + additional
+def normalize_watch_round_orders(requested: int) -> int:
+    """限制重新设置的本轮下单数量为 1-100。"""
+    return max(1, min(int(requested), 100))
 
 
 # ============================================================
@@ -3051,6 +3049,33 @@ def run_bot(cfg: dict):
             reply_markup=kb
         )
 
+    async def show_watch_count_prompt(query, context, session_id: str, back_callback: str):
+        """提示用户直接发送 /watch 的下单数量。"""
+        session = watch_sessions.get(session_id)
+        if not session or not session.get("selected_cfg"):
+            await query.edit_message_text("❌ 监控会话已过期，请重新 /watch")
+            return
+        cfg = session["selected_cfg"]
+        dc = session.get("selected_dc")
+        dc_display = "全部机房" if dc is None else format_dc(dc)
+        context.user_data["watch_count_create"] = {
+            "session_id": session_id,
+            "message": query.message,
+        }
+        await query.edit_message_text(
+            f"🎯 设置下单数量\n\n"
+            f"型号: `{session['plan_code']}`\n"
+            f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+            f"机房: {dc_display}\n\n"
+            f"请直接发送要下单的数量，例如：`5`\n"
+            f"可设置范围：1–100 单",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ 返回上一步", callback_data=back_callback),
+                InlineKeyboardButton("取消", callback_data="cancel"),
+            ]]),
+        )
+
     async def _button_callback_impl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理内联按钮回调 - 支持带存储类型的下单"""
         nonlocal watch_running
@@ -3067,8 +3092,8 @@ def run_bot(cfg: dict):
 
         data = query.data
         parts = data.split("|")
-        if not (len(parts) >= 2 and parts[0] == "watchlist" and parts[1] == "count"):
-            context.user_data.pop("watch_count_edit", None)
+        context.user_data.pop("watch_count_edit", None)
+        context.user_data.pop("watch_count_create", None)
 
         if parts[0] == "buy" and len(parts) >= 3 and parts[1] == "preset":
             plan_code = resolve_plan_code(parts[2])
@@ -3734,17 +3759,8 @@ def run_bot(cfg: dict):
                 if not cfg:
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
-                dc_display = "全部机房" if dc is None else format_dc(dc)
-                keyboard = [
-                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
-                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10")],
-                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
-                ]
-                await query.edit_message_text(
-                    f"🎯 选择下单数量\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n机房: {dc_display}",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                await show_watch_count_prompt(
+                    query, context, session_id, f"watch|dcback|{session_id}"
                 )
 
             elif stage == "cfg" and len(parts) >= 4:
@@ -3785,17 +3801,8 @@ def run_bot(cfg: dict):
                     return
                 if dc == "all":
                     session["selected_dc"] = None
-                    dc_display = "全部机房"
-                    keyboard = [
-                        [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
-                        [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                        [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10")],
-                        [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
-                    ]
-                    await query.edit_message_text(
-                        f"🎯 选择下单数量\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n机房: {dc_display}",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    await show_watch_count_prompt(
+                        query, context, session_id, f"watch|dcback|{session_id}"
                     )
                 else:
                     excluded = set(session.get("excluded_dcs", []))
@@ -3829,17 +3836,8 @@ def run_bot(cfg: dict):
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
                 session["selected_dc"] = dc
-                dc_display = format_dc(dc)
-                keyboard = [
-                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
-                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10")],
-                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|exnext|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
-                ]
-                await query.edit_message_text(
-                    f"🎯 选择下单数量\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n机房: {dc_display}",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                await show_watch_count_prompt(
+                    query, context, session_id, f"watch|exnext|{session_id}"
                 )
 
             elif stage == "count" and len(parts) >= 4:
@@ -3907,20 +3905,8 @@ def run_bot(cfg: dict):
                 if not cfg:
                     await query.edit_message_text("❌ 会话状态丢失，请重新 /watch")
                     return
-                dc = session.get("selected_dc")
-                dc_display = "全部机房" if dc is None else format_dc(dc)
-                keyboard = [
-                    [InlineKeyboardButton("1 单", callback_data=f"watch|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"watch|count|{session_id}|2")],
-                    [InlineKeyboardButton("3 单", callback_data=f"watch|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"watch|count|{session_id}|5")],
-                    [InlineKeyboardButton("10 单", callback_data=f"watch|count|{session_id}|10")],
-                    [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|dcback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
-                ]
-                await query.edit_message_text(
-                    f"🎯 选择下单数量\n\n型号: `{plan_code}`\n"
-                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc_display}",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                await show_watch_count_prompt(
+                    query, context, session_id, f"watch|dcback|{session_id}"
                 )
 
         elif parts[0] == "watchlist":
@@ -3971,7 +3957,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
-                    [InlineKeyboardButton("🎯 追加下单数量", callback_data=f"watchlist|count|{plan_code}")],
+                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{plan_code}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
@@ -3997,12 +3983,13 @@ def run_bot(cfg: dict):
                     "message": query.message,
                 }
                 await query.edit_message_text(
-                    f"🎯 追加下单数量\n\n"
+                    f"🎯 重新设置下单数量\n\n"
                     f"型号: `{plan_code}`\n"
-                    f"已成功下单: {task.get('ordered', 0)} 单\n\n"
-                    f"请直接发送从现在起还要下几单。\n"
-                    f"例如还要再下 5 单，就发送：`5`\n"
-                    f"可追加范围：1–100 单",
+                    f"本轮进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单\n\n"
+                    f"请直接发送新的下单数量。\n"
+                    f"例如要从现在重新下 5 单，就发送：`5`\n"
+                    f"设置后进度会重置为 0/5。\n"
+                    f"可设置范围：1–100 单",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("⬅️ 返回任务", callback_data=f"watchlist|task|{plan_code}"),
@@ -4056,7 +4043,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
-                    [InlineKeyboardButton("🎯 追加下单数量", callback_data=f"watchlist|count|{plan_code}")],
+                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{plan_code}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
@@ -4105,7 +4092,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
-                    [InlineKeyboardButton("🎯 追加下单数量", callback_data=f"watchlist|count|{plan_code}")],
+                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{plan_code}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
@@ -4578,6 +4565,51 @@ def run_bot(cfg: dict):
         if not text.strip():
             return
 
+        create_count = context.user_data.get("watch_count_create")
+        if create_count:
+            session_id = create_count["session_id"]
+            session = watch_sessions.get(session_id)
+            if not session or not session.get("selected_cfg"):
+                context.user_data.pop("watch_count_create", None)
+                await update.message.reply_text("❌ 监控会话已过期，请重新 /watch")
+                return
+            value_text = text.strip()
+            if not re.fullmatch(r"\d+", value_text):
+                await update.message.reply_text("❌ 请输入纯数字，例如要下 5 单就发送：5")
+                return
+            requested = int(value_text)
+            if requested < 1 or requested > 100:
+                await update.message.reply_text("❌ 下单数量只能设置为 1–100，请重新发送")
+                return
+            session["max_orders"] = normalize_watch_round_orders(requested)
+            context.user_data.pop("watch_count_create", None)
+            cfg = session["selected_cfg"]
+            dc = session.get("selected_dc")
+            dc_display = "全部机房" if dc is None else format_dc(dc)
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚀 自动下单（默认）", callback_data=f"watch|mode|{session_id}|auto")],
+                [InlineKeyboardButton("🔔 仅通知", callback_data=f"watch|mode|{session_id}|notify")],
+                [InlineKeyboardButton("⬅️ 返回上一步", callback_data=f"watch|countback|{session_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+            ])
+            result_text = (
+                f"⚙️ 选择监控模式\n\n"
+                f"型号: `{session['plan_code']}`\n"
+                f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
+                f"机房: {dc_display}\n"
+                f"下单数量: {session['max_orders']}"
+            )
+            prompt_message = create_count.get("message")
+            try:
+                await prompt_message.edit_text(result_text, parse_mode="Markdown", reply_markup=keyboard)
+            except Exception as exc:
+                logger.warning(f"更新 watch 数量消息失败，改为发送新消息: {exc}")
+                await update.message.reply_text(result_text, parse_mode="Markdown", reply_markup=keyboard)
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
         count_edit = context.user_data.get("watch_count_edit")
         if count_edit:
             plan_code = count_edit["plan_code"]
@@ -4590,19 +4622,20 @@ def run_bot(cfg: dict):
             if not re.fullmatch(r"\d+", value_text):
                 await update.message.reply_text("❌ 请输入纯数字，例如要下 5 单就发送：5")
                 return
-            additional = int(value_text)
+            requested = int(value_text)
             ordered = int(task.get("ordered", 0) or 0)
-            if additional < 1 or additional > 100:
-                await update.message.reply_text("❌ 追加数量只能设置为 1–100，请重新发送")
+            if requested < 1 or requested > 100:
+                await update.message.reply_text("❌ 下单数量只能设置为 1–100，请重新发送")
                 return
 
             old_max = int(task.get("max_orders", 1) or 1)
             reached_old_limit = ordered >= old_max
-            task["max_orders"] = watch_max_orders_after_additional(task, additional)
+            task["max_orders"] = normalize_watch_round_orders(requested)
+            task["ordered"] = 0
             task["chat_id"] = str(update.effective_chat.id)
+            task["_last_order_time"] = {}
             if reached_old_limit:
                 task["active"] = True
-                task["_last_order_time"] = {}
             save_watch_tasks()
             if task.get("active") and not watch_running:
                 watch_running = True
@@ -4627,13 +4660,13 @@ def run_bot(cfg: dict):
             keyboard = InlineKeyboardMarkup([
                 [action_btn],
                 [mode_btn],
-                [InlineKeyboardButton("🎯 追加下单数量", callback_data=f"watchlist|count|{plan_code}")],
+                [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{plan_code}")],
                 [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                 [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
             ])
             result_text = (
-                f"✅ 已追加 {additional} 单，接下来还会下 {additional} 单\n"
-                f"累计下单目标: {task['max_orders']} 单\n\n"
+                f"✅ 已重新设置下单数量：{task['max_orders']} 单\n"
+                f"本轮进度已重置为 0/{task['max_orders']}\n\n"
                 f"⚙️ 管理监控任务\n\n{status} `{plan_code}`\n"
                 f"模式: {watch_mode_label(task)}\n"
                 f"条件: {', '.join(filter_parts)}\n"
@@ -4759,6 +4792,15 @@ def run_bot(cfg: dict):
 
         return text
 
+    async def delete_command_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """命令处理完成后删除用户发送的 /命令 消息。"""
+        if not update.message or not check_user(update.effective_user.id):
+            return
+        try:
+            await update.message.delete()
+        except Exception as exc:
+            logger.warning(f"删除用户命令消息失败: {exc}")
+
     # ---- 构建 Bot ----
     # OVH 请求较慢时仍允许 Telegram 按钮回调及时进入，避免 callback query 过期。
     app = ApplicationBuilder().token(bot_token).concurrent_updates(4).build()
@@ -4782,6 +4824,7 @@ def run_bot(cfg: dict):
     app.add_handler(CommandHandler("reinstall", reinstall_cmd))
     app.add_handler(CommandHandler("reboot", reboot_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.COMMAND, delete_command_message), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # 如果有恢复的监控任务，自动启动监控循环

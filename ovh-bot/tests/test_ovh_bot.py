@@ -596,18 +596,29 @@ class MonitorTests(unittest.TestCase):
 
 
 class WatchTaskModeTests(unittest.TestCase):
-    def test_watch_order_limit_adds_to_already_ordered_count(self):
-        self.assertEqual(bot.watch_max_orders_after_additional({"ordered": 0}, 5), 5)
-        self.assertEqual(bot.watch_max_orders_after_additional({"ordered": 3}, 2), 5)
-        self.assertEqual(bot.watch_max_orders_after_additional({"ordered": 3}, 0), 4)
-        self.assertEqual(bot.watch_max_orders_after_additional({"ordered": 3}, 999), 103)
+    def test_watch_order_limit_resets_current_round(self):
+        self.assertEqual(bot.normalize_watch_round_orders(5), 5)
+        self.assertEqual(bot.normalize_watch_round_orders(0), 1)
+        self.assertEqual(bot.normalize_watch_round_orders(999), 100)
 
-    def test_watchlist_quantity_uses_direct_additional_number_input(self):
+    def test_watchlist_quantity_resets_progress_from_direct_input(self):
         source = Path(bot.__file__).read_text(encoding="utf-8")
         self.assertIn('context.user_data["watch_count_edit"]', source)
         self.assertIn('re.fullmatch(r"\\d+", value_text)', source)
-        self.assertIn("请直接发送从现在起还要下几单", source)
+        self.assertIn("请直接发送新的下单数量", source)
+        self.assertIn('task["ordered"] = 0', source)
         self.assertIn('task["active"] = True', source)
+
+    def test_watch_creation_quantity_uses_direct_number_input(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('context.user_data["watch_count_create"]', source)
+        self.assertIn("请直接发送要下单的数量", source)
+        self.assertNotIn('callback_data=f"watch|count|{session_id}|1"', source)
+
+    def test_slash_command_messages_are_deleted(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn("async def delete_command_message", source)
+        self.assertIn("MessageHandler(filters.COMMAND, delete_command_message), group=1", source)
 
     def test_auto_buy_result_edits_original_progress_message(self):
         source = Path(bot.__file__).read_text(encoding="utf-8")
