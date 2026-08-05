@@ -596,6 +596,25 @@ class MonitorTests(unittest.TestCase):
 
 
 class WatchTaskModeTests(unittest.TestCase):
+    def test_watchlist_task_uses_friendly_multiline_layout(self):
+        task = {
+            "active": True,
+            "auto_buy": True,
+            "excluded_dcs": ["bhs", "waw"],
+            "storage": "softraid-2x450nvme",
+            "memory": "ram-32g-ecc",
+            "ordered": 0,
+            "max_orders": 5,
+        }
+        text = bot.format_watchlist_task("24sk202", task)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "🟢 监控中 KS-2 (24sk202)")
+        self.assertTrue(lines[1].startswith(" (排除="))
+        self.assertIn("存储=2x450GB NVMe", lines[2])
+        self.assertIn("内存=32GB", lines[2])
+        self.assertEqual(lines[3], " 模式: 🚀 自动下单")
+        self.assertEqual(lines[4], " 进度: 0/5 单")
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)

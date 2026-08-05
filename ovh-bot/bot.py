@@ -1709,6 +1709,15 @@ SERVER_NAME_MAP = {
 }
 
 
+def friendly_plan_name(plan_code: str) -> str:
+    """将 planCode 转为首选友好型号名，例如 24sk202 -> KS-2。"""
+    normalized = str(plan_code or "").lower()
+    for name, mapped_code in SERVER_NAME_MAP.items():
+        if mapped_code.lower() == normalized and "-" in name:
+            return name.upper()
+    return str(plan_code or "")
+
+
 def resolve_plan_code(text: str) -> str:
     """解析服务器型号 - 支持友好名称和 planCode
 
@@ -1792,6 +1801,35 @@ def format_dc_status(status: str) -> str:
 def format_dc(dc: str) -> str:
     """返回中文机房名"""
     return DC_DISPLAY_MAP.get(dc, dc)
+
+
+def format_watchlist_task(plan_code: str, task: dict) -> str:
+    """按多行结构格式化 /watchlist 中的一项任务。"""
+    status = "🟢 监控中" if task.get("active") else "🔴 已停止"
+    friendly = friendly_plan_name(plan_code)
+    lines = [f"{status} {friendly} ({plan_code})"]
+
+    location_parts = []
+    if task.get("dc"):
+        location_parts.append(f"机房={format_dc(task['dc'])}")
+    if task.get("excluded_dcs"):
+        location_parts.append(
+            "排除=" + ", ".join(format_dc(dc) for dc in task.get("excluded_dcs", []))
+        )
+    if location_parts:
+        lines.append(f" ({', '.join(location_parts)})")
+
+    hardware_parts = []
+    if task.get("storage"):
+        hardware_parts.append(f"存储={format_storage(task['storage'])}")
+    if task.get("memory"):
+        hardware_parts.append(f"内存={format_memory(task['memory'])}")
+    if hardware_parts:
+        lines.append(f" {', '.join(hardware_parts)}")
+
+    lines.append(f" 模式: {watch_mode_label(task)}")
+    lines.append(f" 进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单")
+    return "\n".join(lines)
 
 
 def parse_plan_code(text: str):
@@ -2568,24 +2606,7 @@ def run_bot(cfg: dict):
 
         text = "📡 *当前监控列表*\n\n"
         for pc, task in watch_tasks.items():
-            status = "🟢 监控中" if task["active"] else "🔴 已停止"
-            filter_parts = []
-            if task.get("dc"):
-                dc_display = format_dc(task['dc']) if task['dc'] else "全部机房"
-                filter_parts.append(f"机房={dc_display}")
-            if task.get("excluded_dcs"):
-                filter_parts.append("排除=" + ", ".join(format_dc(dc) for dc in task.get('excluded_dcs', [])))
-            if task.get("storage"):
-                filter_parts.append(f"存储={format_storage(task['storage'])}")
-            if task.get("memory"):
-                filter_parts.append(f"内存={format_memory(task['memory'])}")
-            filter_str = f" ({', '.join(filter_parts)})" if filter_parts else ""
-
-            text += (
-                f"{status} `{pc}`{filter_str}\n"
-                f"   模式: {watch_mode_label(task)}\n"
-                f"   进度: {task['ordered']}/{task['max_orders']} 单\n\n"
-            )
+            text += format_watchlist_task(pc, task) + "\n\n"
 
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("⚙️ 管理监控", callback_data="watchlist|manage")],
