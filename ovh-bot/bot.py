@@ -811,6 +811,13 @@ def watch_mode_label(task: dict) -> str:
     return "🚀 自动下单" if watch_auto_buy_enabled(task) else "🔔 仅通知"
 
 
+def normalize_watch_max_orders(task: dict, requested: int) -> int:
+    """监控订单上限限制在 1-100，且不能低于已成功下单数。"""
+    ordered = max(0, int(task.get("ordered", 0) or 0))
+    requested = max(1, min(int(requested), 100))
+    return max(ordered, requested)
+
+
 # ============================================================
 # OVH API 客户端 v2
 # ============================================================
@@ -3060,6 +3067,8 @@ def run_bot(cfg: dict):
 
         data = query.data
         parts = data.split("|")
+        if not (len(parts) >= 2 and parts[0] == "watchlist" and parts[1] == "count"):
+            context.user_data.pop("watch_count_edit", None)
 
         if parts[0] == "buy" and len(parts) >= 3 and parts[1] == "preset":
             plan_code = resolve_plan_code(parts[2])
@@ -3962,6 +3971,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
+                    [InlineKeyboardButton(f"🎯 修改订单数量（当前 {task.get('max_orders', 1)}）", callback_data=f"watchlist|count|{plan_code}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
@@ -3973,6 +3983,31 @@ def run_bot(cfg: dict):
                     f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
                     parse_mode="Markdown",
                     reply_markup=keyboard
+                )
+                return
+
+            if len(parts) >= 3 and parts[1] == "count":
+                plan_code = parts[2]
+                task = watch_tasks.get(plan_code)
+                if not task:
+                    await query.edit_message_text("❌ 监控任务不存在或已删除")
+                    return
+                context.user_data["watch_count_edit"] = {
+                    "plan_code": plan_code,
+                    "message": query.message,
+                }
+                await query.edit_message_text(
+                    f"🎯 修改订单数量\n\n"
+                    f"型号: `{plan_code}`\n"
+                    f"当前上限: {task.get('max_orders', 1)} 单\n"
+                    f"已成功下单: {task.get('ordered', 0)} 单\n\n"
+                    f"请直接发送新的订单数量，例如要下 5 单就发送：`5`\n"
+                    f"可设置范围：1–100",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ 返回任务", callback_data=f"watchlist|task|{plan_code}"),
+                        InlineKeyboardButton("取消", callback_data="cancel"),
+                    ]]),
                 )
                 return
 
@@ -4021,6 +4056,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
+                    [InlineKeyboardButton(f"🎯 修改订单数量（当前 {task.get('max_orders', 1)}）", callback_data=f"watchlist|count|{plan_code}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
@@ -4069,6 +4105,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
+                    [InlineKeyboardButton(f"🎯 修改订单数量（当前 {task.get('max_orders', 1)}）", callback_data=f"watchlist|count|{plan_code}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
@@ -4538,6 +4575,76 @@ def run_bot(cfg: dict):
 
         text = update.message.text or ""
         if not text.strip():
+            return
+
+        count_edit = context.user_data.get("watch_count_edit")
+        if count_edit:
+            plan_code = count_edit["plan_code"]
+            task = watch_tasks.get(plan_code)
+            if not task:
+                context.user_data.pop("watch_count_edit", None)
+                await update.message.reply_text("❌ 监控任务不存在或已删除")
+                return
+            value_text = text.strip()
+            if not re.fullmatch(r"\d+", value_text):
+                await update.message.reply_text("❌ 请输入纯数字，例如要下 5 单就发送：5")
+                return
+            requested = int(value_text)
+            ordered = int(task.get("ordered", 0) or 0)
+            if requested < 1 or requested > 100:
+                await update.message.reply_text("❌ 订单数量只能设置为 1–100，请重新发送")
+                return
+            if requested < ordered:
+                await update.message.reply_text(
+                    f"❌ 已成功下单 {ordered} 单，订单上限不能低于 {ordered}，请重新发送"
+                )
+                return
+
+            old_max = int(task.get("max_orders", 1) or 1)
+            task["max_orders"] = normalize_watch_max_orders(task, requested)
+            task["chat_id"] = str(update.effective_chat.id)
+            save_watch_tasks()
+            context.user_data.pop("watch_count_edit", None)
+
+            status = "🟢 监控中" if task.get("active") else "🔴 已暂停"
+            filter_parts = []
+            filter_parts.append(f"机房={format_dc(task['dc'])}" if task.get("dc") else "机房=全部机房")
+            if task.get("storage"):
+                filter_parts.append(f"存储={format_storage(task['storage'])}")
+            if task.get("memory"):
+                filter_parts.append(f"内存={format_memory(task['memory'])}")
+            action_btn = InlineKeyboardButton(
+                "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
+                callback_data=f"watchlist|toggle|{plan_code}",
+            )
+            mode_btn = InlineKeyboardButton(
+                "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
+                callback_data=f"watchlist|mode|{plan_code}",
+            )
+            keyboard = InlineKeyboardMarkup([
+                [action_btn],
+                [mode_btn],
+                [InlineKeyboardButton(f"🎯 修改订单数量（当前 {task['max_orders']}）", callback_data=f"watchlist|count|{plan_code}")],
+                [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
+                [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
+            ])
+            result_text = (
+                f"✅ 订单数量已从 {old_max} 单修改为 {task['max_orders']} 单\n\n"
+                f"⚙️ 管理监控任务\n\n{status} `{plan_code}`\n"
+                f"模式: {watch_mode_label(task)}\n"
+                f"条件: {', '.join(filter_parts)}\n"
+                f"进度: {task.get('ordered', 0)}/{task['max_orders']} 单"
+            )
+            prompt_message = count_edit.get("message")
+            try:
+                await prompt_message.edit_text(result_text, parse_mode="Markdown", reply_markup=keyboard)
+            except Exception as exc:
+                logger.warning(f"更新监控数量消息失败，改为发送新消息: {exc}")
+                await update.message.reply_text(result_text, parse_mode="Markdown", reply_markup=keyboard)
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
             return
 
         # 解析 planCode
