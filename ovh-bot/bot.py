@@ -970,11 +970,8 @@ class OVHClient:
             return {}
 
     def get_config_price(self, plan_code: str, datacenter: str,
-                         memory: str, storage: str) -> str:
-        """通过创建临时购物车获取指定配置的精确价格
-
-        Returns: 价格字符串如 "€47.98" 或 ""
-        """
+                         memory: str, storage: str, include_tax: bool = True) -> str:
+        """通过临时购物车获取配置价格；include_tax=False 返回未税价格。"""
         cart_id = None
         try:
             # 创建购物车
@@ -1039,9 +1036,10 @@ class OVHClient:
             # 获取价格
             summary = self.get(f"/order/cart/{cart_id}/summary")
             prices = summary.get("prices", {})
-            with_tax = prices.get("withTax", {})
-            price_value = with_tax.get("value") if isinstance(with_tax, dict) else with_tax
-            currency = with_tax.get("currencyCode", "EUR") if isinstance(with_tax, dict) else "EUR"
+            price_key = "withTax" if include_tax else "withoutTax"
+            price_data = prices.get(price_key, {})
+            price_value = price_data.get("value") if isinstance(price_data, dict) else price_data
+            currency = price_data.get("currencyCode", "EUR") if isinstance(price_data, dict) else "EUR"
 
             if price_value is not None:
                 # 转换为可读格式
@@ -3086,6 +3084,32 @@ def run_bot(cfg: dict):
             reply_markup=kb
         )
 
+    async def get_watch_untaxed_price_line(session: dict, dc: str = None) -> str:
+        """获取并缓存 /watch 所选配置的未税价格文本。"""
+        cfg = session.get("selected_cfg")
+        if not cfg:
+            return ""
+        target_dc = dc or session.get("selected_dc")
+        if not target_dc:
+            excluded = set(session.get("excluded_dcs", []))
+            candidates = [
+                name for name, status in cfg.get("datacenters", {}).items()
+                if name not in excluded and status not in UNAVAILABLE_STATES
+            ]
+            if not candidates:
+                candidates = [name for name in cfg.get("datacenters", {}) if name not in excluded]
+            target_dc = candidates[0] if candidates else None
+        if not target_dc:
+            return ""
+        cache = session.setdefault("untaxed_price_cache", {})
+        if target_dc not in cache:
+            cache[target_dc] = await asyncio.to_thread(
+                ovh_client.get_config_price,
+                session["plan_code"], target_dc, cfg.get("memory"), cfg.get("storage"), False,
+            )
+        price = cache.get(target_dc, "")
+        return f"\n💰 未税价格: {price}（不含税）" if price else ""
+
     async def show_watch_count_prompt(query, context, session_id: str, back_callback: str):
         """提示用户直接发送 /watch 的下单数量。"""
         session = watch_sessions.get(session_id)
@@ -3095,6 +3119,13 @@ def run_bot(cfg: dict):
         cfg = session["selected_cfg"]
         dc = session.get("selected_dc")
         dc_display = "全部机房" if dc is None else format_dc(dc)
+        await query.edit_message_text(
+            f"⏳ 正在查询所选配置的未税价格...\n\n"
+            f"型号: `{session['plan_code']}`\n"
+            f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+            parse_mode="Markdown",
+        )
+        price_line = await get_watch_untaxed_price_line(session, dc)
         context.user_data["watch_count_create"] = {
             "session_id": session_id,
             "message": query.message,
@@ -3103,7 +3134,8 @@ def run_bot(cfg: dict):
             f"🎯 设置下单数量\n\n"
             f"型号: `{session['plan_code']}`\n"
             f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-            f"机房: {dc_display}\n\n"
+            f"机房: {dc_display}"
+            f"{price_line}\n\n"
             f"请直接发送要下单的数量，例如：`5`\n"
             f"可设置范围：1–100 单",
             parse_mode="Markdown",
@@ -3821,9 +3853,16 @@ def run_bot(cfg: dict):
                     InlineKeyboardButton("下一步", callback_data=f"watch|exnext|{session_id}"),
                 ])
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
-                title = f"🚫 排除机房（可多选）\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n\n点机房可切换排除/恢复，点下一步继续。"
+                await query.edit_message_text(
+                    f"⏳ 正在查询所选配置的未税价格...\n\n"
+                    f"型号: `{plan_code}`\n"
+                    f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}",
+                    parse_mode="Markdown",
+                )
+                price_line = await get_watch_untaxed_price_line(session)
+                title = f"🚫 排除机房（可多选）\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}{price_line}\n\n点机房可切换排除/恢复，点下一步继续。"
                 if not dcs:
-                    title = f"📍 这个配置没有可选机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}"
+                    title = f"📍 这个配置没有可选机房\n\n型号: `{plan_code}`\n配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}{price_line}"
                 await query.edit_message_text(
                     title,
                     parse_mode="Markdown",
@@ -3910,6 +3949,7 @@ def run_bot(cfg: dict):
                 auto_buy = parts[3] != "notify"
                 session["auto_buy"] = auto_buy
                 dc_display = "全部机房" if dc is None else format_dc(dc)
+                price_line = await get_watch_untaxed_price_line(session, dc)
                 confirm_id = str(int(time.time() * 1000))[-10:]
                 pending_actions[confirm_id] = {
                     "type": "watch_start",
@@ -3930,7 +3970,8 @@ def run_bot(cfg: dict):
                     f"📡 确认开始监控\n\n"
                     f"型号: `{plan_code}`\n"
                     f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                    f"机房: {dc_display}\n"
+                    f"机房: {dc_display}"
+                    f"{price_line}\n"
                     f"模式: {watch_mode_label({'auto_buy': auto_buy})}\n"
                     f"下单上限: {session.get('max_orders', 1)}",
                     parse_mode="Markdown",
@@ -4623,6 +4664,7 @@ def run_bot(cfg: dict):
             cfg = session["selected_cfg"]
             dc = session.get("selected_dc")
             dc_display = "全部机房" if dc is None else format_dc(dc)
+            price_line = await get_watch_untaxed_price_line(session, dc)
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚀 自动下单（默认）", callback_data=f"watch|mode|{session_id}|auto")],
                 [InlineKeyboardButton("🔔 仅通知", callback_data=f"watch|mode|{session_id}|notify")],
@@ -4632,7 +4674,8 @@ def run_bot(cfg: dict):
                 f"⚙️ 选择监控模式\n\n"
                 f"型号: `{session['plan_code']}`\n"
                 f"配置: {format_memory(cfg['memory'])} + {format_storage(cfg['storage'])}\n"
-                f"机房: {dc_display}\n"
+                f"机房: {dc_display}"
+                f"{price_line}\n"
                 f"下单数量: {session['max_orders']}"
             )
             prompt_message = create_count.get("message")
