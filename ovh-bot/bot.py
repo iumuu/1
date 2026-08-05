@@ -2209,7 +2209,7 @@ def run_bot(cfg: dict):
                                 )
                                 continue
 
-                            await _send_msg(
+                            progress_message = await _send_msg(
                                 f"🔥 *监控发现 `{plan_code}` 有货！*\n"
                                 f"📍 {dc_display} | {chosen['memory_display']} + {chosen['storage_display']}\n"
                                 f"🚀 正在自动下单... ({task['ordered']+1}/{task['max_orders']})",
@@ -2261,7 +2261,9 @@ def run_bot(cfg: dict):
                                 save_watch_tasks()
                                 text = f"❌ 监控自动下单失败: `{plan_code}`\n{result['error']}"
 
-                            await _send_msg(text, task.get("chat_id"))
+                            await _edit_monitor_msg(
+                                progress_message, text, task.get("chat_id")
+                            )
                     except Exception as e:
                         logger.error(f"监控 {plan_code} 出错: {e}")
 
@@ -2271,19 +2273,37 @@ def run_bot(cfg: dict):
             await asyncio.sleep(10)  # 每 10 秒检查一次
 
     async def _send_msg(text: str, chat_id: str = None):
-        """发送消息到指定 chat；未指定则回退到默认 chat"""
+        """发送消息到指定 chat 并返回 Message；未指定则回退到默认 chat。"""
         try:
             target_chat_id = str(chat_id or tg_cfg.get("chat_id", ""))
             if not target_chat_id or bot_app is None:
                 logger.error(f"发送监控消息失败: chat_id={target_chat_id}, bot_app={bot_app is not None}")
-                return
+                return None
             try:
-                await bot_app.bot.send_message(chat_id=target_chat_id, text=text, parse_mode="Markdown")
+                return await bot_app.bot.send_message(
+                    chat_id=target_chat_id, text=text, parse_mode="Markdown"
+                )
             except Exception as markdown_error:
                 logger.error(f"监控 Markdown 消息发送失败，改用纯文本: {markdown_error}")
-                await bot_app.bot.send_message(chat_id=target_chat_id, text=text)
+                return await bot_app.bot.send_message(chat_id=target_chat_id, text=text)
         except Exception as e:
             logger.error(f"发送监控消息失败: {e}")
+            return None
+
+    async def _edit_monitor_msg(message, text: str, chat_id: str = None):
+        """优先编辑监控中的原消息；编辑失败时才降级发送新消息。"""
+        if message is not None:
+            try:
+                await message.edit_text(text=text, parse_mode="Markdown")
+                return message
+            except Exception as markdown_error:
+                logger.warning(f"编辑监控 Markdown 消息失败，改用纯文本: {markdown_error}")
+                try:
+                    await message.edit_text(text=text)
+                    return message
+                except Exception as edit_error:
+                    logger.error(f"编辑监控消息失败，将降级发送新消息: {edit_error}")
+        return await _send_msg(text, chat_id)
 
     def _progress_bar(percent: int, width: int = 12) -> str:
         return progress_bar_text(percent, width)

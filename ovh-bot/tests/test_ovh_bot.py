@@ -596,6 +596,15 @@ class MonitorTests(unittest.TestCase):
 
 
 class WatchTaskModeTests(unittest.TestCase):
+    def test_auto_buy_result_edits_original_progress_message(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        monitor_start = source.index("    async def watch_monitor_loop")
+        monitor_end = source.index("    async def _send_msg", monitor_start)
+        monitor_source = source[monitor_start:monitor_end]
+
+        self.assertIn("progress_message = await _send_msg", monitor_source)
+        self.assertIn("await _edit_monitor_msg", monitor_source)
+
     def test_existing_tasks_default_to_auto_buy(self):
         self.assertTrue(bot.watch_auto_buy_enabled({}))
         self.assertEqual(bot.watch_mode_label({}), "🚀 自动下单")
