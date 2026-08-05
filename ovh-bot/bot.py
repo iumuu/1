@@ -1845,31 +1845,28 @@ def format_dc(dc: str) -> str:
 
 
 def format_watchlist_task(plan_code: str, task: dict) -> str:
-    """按多行结构格式化 /watchlist 中的一项任务。"""
+    """按带字段图标的多行结构格式化 /watchlist 任务。"""
     status = "🟢 监控中" if task.get("active") else "🔴 已停止"
     friendly = friendly_plan_name(plan_code)
-    lines = [f"{status} {friendly} ({plan_code})"]
+    lines = [status, f"📦 型号: {friendly} ({plan_code})"]
 
-    location_parts = []
     if task.get("dc"):
-        location_parts.append(f"机房={format_dc(task['dc'])}")
+        lines.append(f"📍 机房: {format_dc(task['dc'])}")
     if task.get("excluded_dcs"):
-        location_parts.append(
-            "排除=" + ", ".join(format_dc(dc) for dc in task.get("excluded_dcs", []))
+        lines.append(
+            "🚫 排除: " + ", ".join(format_dc(dc) for dc in task.get("excluded_dcs", []))
         )
-    if location_parts:
-        lines.append(f" ({', '.join(location_parts)})")
 
     hardware_parts = []
     if task.get("storage"):
-        hardware_parts.append(f"存储={format_storage(task['storage'])}")
+        hardware_parts.append(format_storage(task["storage"]))
     if task.get("memory"):
-        hardware_parts.append(f"内存={format_memory(task['memory'])}")
+        hardware_parts.append(format_memory(task["memory"]))
     if hardware_parts:
-        lines.append(f" {', '.join(hardware_parts)}")
+        lines.append(f"💾 配置: {', '.join(hardware_parts)}")
 
-    lines.append(f" 模式: {watch_mode_label(task)}")
-    lines.append(f" 进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单")
+    lines.append(f"⚙️ 模式: {watch_mode_label(task)}")
+    lines.append(f"📊 进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单")
     return "\n".join(lines)
 
 
@@ -4091,11 +4088,7 @@ def run_bot(cfg: dict):
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
                 await query.edit_message_text(
-                    f"⚙️ 管理监控任务\n\n"
-                    f"{status} `{plan_code}`\n"
-                    f"⚙️ 模式: {watch_mode_label(task)}\n"
-                    f"条件: {', '.join(filter_parts)}\n"
-                    f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
+                    f"⚙️ 管理监控任务\n\n{format_watchlist_task(plan_code, task)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
                 )
@@ -4177,11 +4170,7 @@ def run_bot(cfg: dict):
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
                 await query.edit_message_text(
-                    f"⚙️ 管理监控任务\n\n"
-                    f"{status} `{plan_code}`\n"
-                    f"⚙️ 模式: {watch_mode_label(task)}\n"
-                    f"条件: {', '.join(filter_parts)}\n"
-                    f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
+                    f"⚙️ 管理监控任务\n\n{format_watchlist_task(plan_code, task)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
                 )
@@ -4226,11 +4215,7 @@ def run_bot(cfg: dict):
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
                 await query.edit_message_text(
-                    f"⚙️ 管理监控任务\n\n"
-                    f"{status} `{plan_code}`\n"
-                    f"⚙️ 模式: {watch_mode_label(task)}\n"
-                    f"条件: {', '.join(filter_parts)}\n"
-                    f"进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单",
+                    f"⚙️ 管理监控任务\n\n{format_watchlist_task(plan_code, task)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
                 )
@@ -4798,10 +4783,7 @@ def run_bot(cfg: dict):
             result_text = (
                 f"✅ 已重新设置下单数量：{task['max_orders']} 单\n"
                 f"本轮进度已重置为 0/{task['max_orders']}\n\n"
-                f"⚙️ 管理监控任务\n\n{status} `{plan_code}`\n"
-                f"⚙️ 模式: {watch_mode_label(task)}\n"
-                f"条件: {', '.join(filter_parts)}\n"
-                f"进度: {task.get('ordered', 0)}/{task['max_orders']} 单"
+                f"⚙️ 管理监控任务\n\n{format_watchlist_task(plan_code, task)}"
             )
             prompt_message = count_edit.get("message")
             try:

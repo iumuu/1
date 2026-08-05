@@ -646,12 +646,14 @@ class WatchTaskModeTests(unittest.TestCase):
         }
         text = bot.format_watchlist_task("24sk202", task)
         lines = text.splitlines()
-        self.assertEqual(lines[0], "🟢 监控中 KS-2 (24sk202)")
-        self.assertTrue(lines[1].startswith(" (排除="))
-        self.assertIn("存储=2x450GB NVMe", lines[2])
-        self.assertIn("内存=32GB", lines[2])
-        self.assertEqual(lines[3], " 模式: 🚀 自动下单")
-        self.assertEqual(lines[4], " 进度: 0/5 单")
+        self.assertEqual(lines[0], "🟢 监控中")
+        self.assertEqual(lines[1], "📦 型号: KS-2 (24sk202)")
+        self.assertTrue(lines[2].startswith("🚫 排除: "))
+        self.assertIn("2x450GB NVMe", lines[3])
+        self.assertIn("32GB", lines[3])
+        self.assertTrue(lines[3].startswith("💾 配置: "))
+        self.assertEqual(lines[4], "⚙️ 模式: 🚀 自动下单")
+        self.assertEqual(lines[5], "📊 进度: 0/5 单")
 
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
