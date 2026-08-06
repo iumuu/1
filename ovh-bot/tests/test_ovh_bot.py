@@ -698,6 +698,18 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn('callback_data=f"restockbuy|{buy_id}"', source)
         self.assertIn('CommandHandler("restock", restock_cmd)', source)
 
+    def test_watchlist_can_toggle_datacenters_per_task(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('callback_data=f"watchlist|dcs|{task_id}"', source)
+        self.assertIn('callback_data=f"watchlist|dctoggle|{task_id}|{dc}"', source)
+        self.assertIn("至少保留一个监控机房", source)
+        self.assertIn('task["excluded_dcs"] = sorted(set(all_dcs) - monitored)', source)
+
+    def test_restock_is_registered_in_telegram_menu(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('BotCommand("restock", "全机型补货通知")', source)
+        self.assertIn("await application.bot.set_my_commands", source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)

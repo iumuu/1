@@ -1964,7 +1964,7 @@ def guess_server_type(plan_code: str) -> str:
 # Telegram Bot
 # ============================================================
 def run_bot(cfg: dict):
-    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
     from telegram.ext import (
         ApplicationBuilder,
         CommandHandler,
@@ -2005,7 +2005,8 @@ def run_bot(cfg: dict):
             "常用入口:\n"
             "🛒 `/buy 型号` - 只显示当前有货配置，按钮抢购\n"
             "📡 `/watch 型号` - 显示全部配置，按钮设置监控\n"
-            "📋 `/watchlist` - 查看、暂停、启用、删除监控\n"
+            "📋 `/watchlist` - 查看和管理监控任务\n"
+            "🔥 `/restock` - 全机型补货通知\n"
             "💳 `/status` - 查看最近订单\n"
             "🖥️ `/servers` - 服务器列表、重装、重启\n\n"
             "输入 `/help` 查看完整说明。\n"
@@ -2027,7 +2028,9 @@ def run_bot(cfg: dict):
             "`/watch 型号`\n"
             "列出全部配置，包括当前无货配置；按按钮选择配置、机房、下单上限。\n\n"
             "`/watchlist`\n"
-            "查看监控进度，并可按钮暂停、启用、删除任务。已达上限的任务重新启用会自动重置进度。\n\n"
+            "查看监控进度，并可暂停、启用、修改机房、改数量和删除任务。\n\n"
+            "`/restock`\n"
+            "管理 Eco 全机型补货通知；补货消息附带立即下单按钮。\n\n"
             "`/unwatch 型号`\n"
             "删除指定监控；不带型号时删除全部监控。\n\n"
             "💳 *订单*\n"
@@ -4315,6 +4318,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
+                    [InlineKeyboardButton("📍 修改监控机房", callback_data=f"watchlist|dcs|{task_id}")],
                     [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
@@ -4323,6 +4327,68 @@ def run_bot(cfg: dict):
                     f"⚙️ 管理监控任务\n\n{format_watchlist_task(plan_code, task)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
+                )
+                return
+
+            if len(parts) >= 3 and parts[1] in {"dcs", "dctoggle"}:
+                task_id = parts[2]
+                task = watch_tasks.get(task_id)
+                plan_code = task.get("plan_code", task_id) if task else task_id
+                if not task:
+                    await query.edit_message_text("❌ 监控任务不存在或已删除")
+                    return
+                all_configs = await asyncio.to_thread(ovh_client.check_availability, plan_code)
+                selected_cfg = next(
+                    (cfg for cfg in all_configs if task.get("fqn") and cfg.get("fqn") == task.get("fqn")),
+                    None,
+                )
+                if not selected_cfg:
+                    selected_cfg = next(
+                        (cfg for cfg in all_configs
+                         if memory_matches(cfg.get("memory"), task.get("memory"))
+                         and storage_matches(cfg.get("storage"), task.get("storage"))),
+                        None,
+                    )
+                if not selected_cfg:
+                    await query.edit_message_text("❌ 无法读取该配置支持的机房，请稍后重试")
+                    return
+                task["fqn"] = selected_cfg.get("fqn")
+                all_dcs = list(selected_cfg.get("datacenters", {}).keys())
+                if task.get("dc"):
+                    monitored = {task["dc"]}
+                else:
+                    monitored = set(all_dcs) - set(task.get("excluded_dcs", []))
+                if parts[1] == "dctoggle" and len(parts) >= 4:
+                    dc = parts[3]
+                    if dc in monitored:
+                        if len(monitored) <= 1:
+                            await query.answer("至少保留一个监控机房", show_alert=True)
+                        else:
+                            monitored.remove(dc)
+                    else:
+                        monitored.add(dc)
+                    task["dc"] = None
+                    task["excluded_dcs"] = sorted(set(all_dcs) - monitored)
+                    task["chat_id"] = str(query.message.chat_id)
+                    save_watch_tasks()
+                keyboard = []
+                for dc, status in selected_cfg.get("datacenters", {}).items():
+                    mark = "✅" if dc in monitored else "❌"
+                    keyboard.append([InlineKeyboardButton(
+                        f"{mark} {format_dc(dc)} ({format_dc_status(status)})",
+                        callback_data=f"watchlist|dctoggle|{task_id}|{dc}",
+                    )])
+                keyboard.append([
+                    InlineKeyboardButton("⬅️ 返回任务", callback_data=f"watchlist|task|{task_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel"),
+                ])
+                await query.edit_message_text(
+                    f"📍 *修改监控机房*\n\n"
+                    f"📦 型号: {friendly_plan_name(plan_code)} (`{plan_code}`)\n"
+                    f"💾 配置: {format_memory(task.get('memory'))} + {format_storage(task.get('storage'))}\n\n"
+                    f"✅ 正在监控　❌ 已取消\n点击机房即可添加或取消监控。",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                 )
                 return
 
@@ -4399,6 +4465,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
+                    [InlineKeyboardButton("📍 修改监控机房", callback_data=f"watchlist|dcs|{task_id}")],
                     [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
@@ -4445,6 +4512,7 @@ def run_bot(cfg: dict):
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
+                    [InlineKeyboardButton("📍 修改监控机房", callback_data=f"watchlist|dcs|{task_id}")],
                     [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
@@ -4714,6 +4782,7 @@ def run_bot(cfg: dict):
                     task_id = str(int(time.time() * 1000000))[-14:]
                     watch_tasks[task_id] = {
                         "plan_code": plan_code,
+                        "fqn": action.get("fqn"),
                         "dc": action.get("dc"),
                         "excluded_dcs": action.get("excluded_dcs", []),
                         "storage": action.get("storage"),
@@ -5156,6 +5225,20 @@ def run_bot(cfg: dict):
 
     async def restore_background_monitors(application):
         nonlocal watch_running, restock_running
+        await application.bot.set_my_commands([
+            BotCommand("start", "开始使用"),
+            BotCommand("help", "查看完整帮助"),
+            BotCommand("buy", "立即购买服务器"),
+            BotCommand("watch", "添加配置监控"),
+            BotCommand("watchlist", "管理监控任务"),
+            BotCommand("restock", "全机型补货通知"),
+            BotCommand("check", "查看型号库存"),
+            BotCommand("status", "查看订单"),
+            BotCommand("pay", "获取付款链接"),
+            BotCommand("servers", "管理服务器"),
+            BotCommand("keys", "查看 SSH 密钥"),
+            BotCommand("catalog", "查看服务器目录"),
+        ])
         if restock_state.get("enabled"):
             restock_running = True
             asyncio.create_task(restock_monitor_loop())
