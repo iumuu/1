@@ -5158,12 +5158,12 @@ def run_bot(cfg: dict):
         nonlocal watch_running, restock_running
         if restock_state.get("enabled"):
             restock_running = True
-            application.create_task(restock_monitor_loop())
+            asyncio.create_task(restock_monitor_loop())
             logger.info("恢复全机型补货通知")
         active_count = sum(1 for task in watch_tasks.values() if task.get("active"))
         if active_count:
             watch_running = True
-            application.create_task(watch_monitor_loop())
+            asyncio.create_task(watch_monitor_loop())
             logger.info(f"恢复 {active_count} 个监控任务，自动启动监控循环")
 
     # ---- 构建 Bot ----
