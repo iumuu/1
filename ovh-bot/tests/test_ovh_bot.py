@@ -731,6 +731,8 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn('InlineKeyboardButton("📋 查看服务器"', source)
         self.assertIn('if parts[0] == "delivery"', source)
         self.assertIn('"📋 *服务器详情*\\n"', source)
+        self.assertIn('disk_lines = "💾 硬盘:\\n"', source)
+        self.assertIn("format_disk_group(group, default_group)", source)
 
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)

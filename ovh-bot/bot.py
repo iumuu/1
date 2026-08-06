@@ -2526,12 +2526,19 @@ def run_bot(cfg: dict):
                                 "state": info.get("state", "?"),
                                 "disk_groups": disk_groups, "default_group": default_group,
                             }
+                            disk_lines = ""
+                            if disk_groups:
+                                disk_lines = "💾 硬盘:\n" + "\n".join(
+                                    f"　{format_disk_group(group, default_group)}"
+                                    for group in disk_groups
+                                ) + "\n"
                             text = (
                                 f"🆕 *新服务器已发货*\n\n"
                                 f"🖥️ 服务器: `{service_name}`\n"
                                 f"📦 型号: `{info.get('commercialRange', '?')}`\n"
                                 f"📍 机房: `{info.get('datacenter', '?')}`\n"
                                 + (f"🌐 IP: `{info.get('ip')}`\n" if info.get("ip") else "")
+                                + disk_lines
                                 + "\n请选择后续操作："
                             )
                             await bot_app.bot.send_message(
