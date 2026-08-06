@@ -669,6 +669,35 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertEqual(lines[4], "⚙️ 模式: 🚀 自动下单")
         self.assertEqual(lines[5], "📊 进度: 0/5 单")
 
+    def test_restock_snapshot_only_reports_unavailable_to_available(self):
+        rows_down = [{
+            "planCode": "24sk202", "fqn": "24sk202.ram.storage",
+            "memory": "ram-32g", "storage": "softraid-2x450nvme",
+            "datacenters": [{"datacenter": "fra", "availability": "unavailable"}],
+        }]
+        rows_up = [{
+            **rows_down[0],
+            "datacenters": [{"datacenter": "fra", "availability": "available"}],
+        }]
+        previous = bot.build_restock_snapshot(rows_down, {"24sk202"})
+        current = bot.build_restock_snapshot(rows_up, {"24sk202"})
+        self.assertEqual(bot.find_restock_events({}, current), [])
+        events = bot.find_restock_events(previous, current)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["dc"], "fra")
+
+    def test_watch_tasks_use_independent_ids_and_keep_plan_code(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('watch_tasks[task_id] = {', source)
+        self.assertIn('"plan_code": plan_code', source)
+        self.assertNotIn('watch_tasks[plan_code] = {', source)
+        self.assertIn('callback_data=f"watchlist|task|{task_id}"', source)
+
+    def test_restock_notification_has_buy_button(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('callback_data=f"restockbuy|{buy_id}"', source)
+        self.assertIn('CommandHandler("restock", restock_cmd)', source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)

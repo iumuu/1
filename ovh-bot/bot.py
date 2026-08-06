@@ -1894,6 +1894,42 @@ def format_watchlist_task(plan_code: str, task: dict) -> str:
     return "\n".join(lines)
 
 
+def build_restock_snapshot(rows: list, allowed_plans: set = None) -> dict:
+    """将 OVH 全量库存转换为配置+机房维度的有货状态快照。"""
+    snapshot = {}
+    for row in rows or []:
+        plan_code = str(row.get("planCode") or row.get("fqn", "").split(".")[0])
+        if not plan_code or (allowed_plans is not None and plan_code not in allowed_plans):
+            continue
+        fqn = str(row.get("fqn", ""))
+        for dc_info in row.get("datacenters", []) or []:
+            dc = str(dc_info.get("datacenter", ""))
+            if not dc:
+                continue
+            status = str(dc_info.get("availability", "unknown"))
+            key = f"{plan_code}|{fqn}|{dc}"
+            snapshot[key] = {
+                "available": status not in UNAVAILABLE_STATES,
+                "plan_code": plan_code,
+                "fqn": fqn,
+                "memory": row.get("memory"),
+                "storage": row.get("storage"),
+                "dc": dc,
+                "status": status,
+            }
+    return snapshot
+
+
+def find_restock_events(previous: dict, current: dict) -> list:
+    """仅返回明确从无货变为有货的库存项；首次快照不会通知。"""
+    if not previous:
+        return []
+    return [
+        item for key, item in current.items()
+        if item.get("available") and key in previous and not previous[key].get("available")
+    ]
+
+
 def parse_plan_code(text: str):
     """从文本中提取 planCode（兼容旧调用，内部使用 resolve_plan_code）"""
     text_lower = text.lower()
@@ -2186,6 +2222,7 @@ def run_bot(cfg: dict):
     import os as _os
     DATA_DIR = _os.environ.get("OVH_BOT_DATA_DIR") or str(Path(__file__).parent / "data")
     WATCH_FILE = _os.path.join(DATA_DIR, "watch_tasks.json")
+    RESTOCK_FILE = _os.path.join(DATA_DIR, "restock_monitor.json")
     SERVER_NOTES_FILE = _os.path.join(DATA_DIR, "server_notes.json")
 
     def save_watch_tasks():
@@ -2212,14 +2249,43 @@ def run_bot(cfg: dict):
                     data = json.load(f)
                 if not isinstance(data, dict):
                     raise ValueError("监控任务文件的顶层必须是对象")
-                for pc, task in data.items():
+                for task_id, task in data.items():
                     task.setdefault("auto_buy", True)
+                    task.setdefault("plan_code", task_id)
                     task["_last_order_time"] = {}
-                    watch_tasks[pc] = task
+                    watch_tasks[task_id] = task
                 if watch_tasks:
                     logger.info(f"从文件恢复 {len(watch_tasks)} 个监控任务")
         except Exception as e:
             logger.warning(f"加载监控任务失败: {e}")
+
+    restock_state = {"enabled": False, "chat_id": "", "snapshot": {}}
+
+    def save_restock_state():
+        try:
+            _os.makedirs(DATA_DIR, exist_ok=True)
+            temp_file = RESTOCK_FILE + ".tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(restock_state, f, ensure_ascii=False)
+                f.flush()
+                _os.fsync(f.fileno())
+            _os.replace(temp_file, RESTOCK_FILE)
+        except Exception as exc:
+            logger.warning(f"保存全机型补货状态失败: {exc}")
+
+    def load_restock_state():
+        try:
+            if not _os.path.exists(RESTOCK_FILE):
+                return
+            with open(RESTOCK_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                restock_state.update(data)
+                restock_state.setdefault("snapshot", {})
+        except Exception as exc:
+            logger.warning(f"加载全机型补货状态失败: {exc}")
+
+    load_restock_state()
 
     def save_server_notes():
         """原子保存服务器备注。"""
@@ -2257,9 +2323,11 @@ def run_bot(cfg: dict):
     server_notes = {}
     load_server_notes()
     watch_running = False
+    restock_running = False
     pending_actions = {}
     watch_sessions = {}
     buy_sessions = {}
+    restock_buy_sessions = {}
     server_list_sessions = {}
     order_lock = asyncio.Lock()
 
@@ -2268,7 +2336,8 @@ def run_bot(cfg: dict):
         nonlocal watch_running
         while watch_running:
             try:
-                for plan_code, task in list(watch_tasks.items()):
+                for task_id, task in list(watch_tasks.items()):
+                    plan_code = task.get("plan_code", task_id)
                     if not task["active"]:
                         continue
                     auto_buy = watch_auto_buy_enabled(task)
@@ -2380,6 +2449,59 @@ def run_bot(cfg: dict):
                 logger.error(f"监控循环出错: {e}")
 
             await asyncio.sleep(10)  # 每 10 秒检查一次
+
+    async def restock_monitor_loop():
+        """单次请求扫描 Eco 全机型，仅通知无货→有货变化。"""
+        nonlocal restock_running
+        while restock_running and restock_state.get("enabled"):
+            try:
+                catalog = await asyncio.to_thread(ovh_client.get_catalog, "eco")
+                allowed_plans = {
+                    str(plan.get("planCode")) for plan in catalog.get("plans", [])
+                    if plan.get("planCode")
+                }
+                rows = await asyncio.to_thread(
+                    ovh_client.get, "/dedicated/server/datacenter/availabilities"
+                )
+                current = build_restock_snapshot(rows, allowed_plans)
+                previous = restock_state.get("snapshot", {})
+                events = find_restock_events(previous, current)
+                for item in events:
+                    plan_code = item["plan_code"]
+                    friendly = friendly_plan_name(plan_code)
+                    storage = format_storage(item.get("storage"))
+                    memory = format_memory(item.get("memory"))
+                    dc = item.get("dc", "")
+                    text = (
+                        f"🔥 *全机型补货通知*\n\n"
+                        f"📦 型号: {friendly} (`{plan_code}`)\n"
+                        f"💾 配置: {memory} + {storage}\n"
+                        f"📍 机房: {format_dc(dc)}\n"
+                        f"✅ 库存: {format_dc_status(item.get('status'))}"
+                    )
+                    buy_id = str(int(time.time() * 1000000))[-14:]
+                    restock_buy_sessions[buy_id] = item
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "🛒 立即下单",
+                            callback_data=f"restockbuy|{buy_id}",
+                        )
+                    ]])
+                    try:
+                        await bot_app.bot.send_message(
+                            chat_id=str(restock_state.get("chat_id") or tg_cfg.get("chat_id", "")),
+                            text=text,
+                            parse_mode="Markdown",
+                            reply_markup=keyboard,
+                        )
+                    except Exception as exc:
+                        logger.error(f"发送全机型补货通知失败: {exc}")
+                restock_state["snapshot"] = current
+                save_restock_state()
+            except Exception as exc:
+                logger.error(f"全机型补货扫描失败: {exc}")
+            await asyncio.sleep(60)
+        restock_running = False
 
     async def _send_msg(text: str, chat_id: str = None):
         """发送消息到指定 chat 并返回 Message；未指定则回退到默认 chat。"""
@@ -2642,17 +2764,23 @@ def run_bot(cfg: dict):
             await update.message.reply_text(f"📭 已取消所有监控 ({count} 个)")
             return
 
-        plan_code = resolve_plan_code(context.args[0])
-        if not plan_code:
-            await update.message.reply_text(f"❌ 无法识别型号: {context.args[0]}\n\n可用名称: ks-1-b, ks-stor, ks-2, rise-2 等")
-            return
-        if plan_code in watch_tasks:
-            watch_tasks[plan_code]["active"] = False
-            del watch_tasks[plan_code]
+        task_id = context.args[0]
+        matching_ids = [
+            current_id for current_id, task in watch_tasks.items()
+            if task.get("plan_code", current_id) == resolve_plan_code(context.args[0])
+        ]
+        if task_id in watch_tasks:
+            matching_ids = [task_id]
+        if matching_ids:
+            for current_id in matching_ids:
+                watch_tasks[current_id]["active"] = False
+                del watch_tasks[current_id]
             save_watch_tasks()
-            await update.message.reply_text(f"📭 已取消监控 `{plan_code}`", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"📭 已取消 {len(matching_ids)} 个匹配的监控任务"
+            )
         else:
-            await update.message.reply_text(f"⚠️ `{plan_code}` 不在监控列表中", parse_mode="Markdown")
+            await update.message.reply_text(f"⚠️ 未找到匹配的监控任务")
 
     async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """查看当前监控列表"""
@@ -2667,14 +2795,38 @@ def run_bot(cfg: dict):
             return
 
         text = "📡 *当前监控列表*\n\n"
-        for pc, task in watch_tasks.items():
-            text += format_watchlist_task(pc, task) + "\n\n"
+        for task_id, task in watch_tasks.items():
+            text += format_watchlist_task(task.get("plan_code", task_id), task) + "\n\n"
 
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("⚙️ 管理监控", callback_data="watchlist|manage")],
             [InlineKeyboardButton("取消", callback_data="cancel")],
         ])
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+    async def restock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """查看和管理全机型补货通知。"""
+        if not check_user(update.effective_user.id):
+            return
+        enabled = bool(restock_state.get("enabled"))
+        status = "🟢 已启用" if enabled else "🔴 已停用"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "⏹ 停用补货通知" if enabled else "▶️ 启用补货通知",
+                callback_data="restock|off" if enabled else "restock|on",
+            )],
+            [InlineKeyboardButton("取消", callback_data="cancel")],
+        ])
+        await update.message.reply_text(
+            f"🔥 *全机型补货通知*\n\n"
+            f"状态: {status}\n"
+            f"范围: OVH Eco 目录全部机型\n"
+            f"间隔: 每 60 秒扫描\n"
+            f"通知: 仅无货变为有货时发送\n"
+            f"下单: 通知附带立即下单按钮",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
 
     async def catalog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_user(update.effective_user.id):
@@ -3219,7 +3371,7 @@ def run_bot(cfg: dict):
 
     async def _button_callback_impl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理内联按钮回调 - 支持带存储类型的下单"""
-        nonlocal watch_running
+        nonlocal watch_running, restock_running
         query = update.callback_query
         try:
             await query.answer()
@@ -3235,6 +3387,60 @@ def run_bot(cfg: dict):
         parts = data.split("|")
         context.user_data.pop("watch_count_edit", None)
         context.user_data.pop("watch_count_create", None)
+
+        if parts[0] == "restockbuy" and len(parts) >= 2:
+            item = restock_buy_sessions.get(parts[1])
+            if not item:
+                await query.edit_message_text("❌ 补货下单按钮已过期，请重新等待补货通知")
+                return
+            plan_code = item["plan_code"]
+            all_configs = await asyncio.to_thread(ovh_client.check_availability, plan_code)
+            selected = next((cfg for cfg in all_configs if cfg.get("fqn") == item.get("fqn")), None)
+            if not selected:
+                await query.edit_message_text("❌ 该补货配置已不可用，请等待下一次通知")
+                return
+            session_id = str(int(time.time() * 1000))[-10:]
+            buy_sessions[session_id] = {
+                "plan_code": plan_code,
+                "all_configs": all_configs,
+                "display_configs": all_configs,
+                "selected_cfg": selected,
+                "selected_dc": item.get("dc"),
+                "target_storage": selected.get("storage"),
+                "target_memory": selected.get("memory"),
+                "count": 1,
+            }
+            keyboard = [
+                [InlineKeyboardButton("1 单", callback_data=f"buy|count|{session_id}|1"), InlineKeyboardButton("2 单", callback_data=f"buy|count|{session_id}|2")],
+                [InlineKeyboardButton("3 单", callback_data=f"buy|count|{session_id}|3"), InlineKeyboardButton("5 单", callback_data=f"buy|count|{session_id}|5")],
+                [InlineKeyboardButton("10 单", callback_data=f"buy|count|{session_id}|10")],
+                [InlineKeyboardButton("取消", callback_data="cancel")],
+            ]
+            await query.edit_message_text(
+                f"🎯 选择下单数量\n\n"
+                f"📦 型号: {friendly_plan_name(plan_code)} (`{plan_code}`)\n"
+                f"💾 配置: {format_memory(selected['memory'])} + {format_storage(selected['storage'])}\n"
+                f"📍 机房: {format_dc(item.get('dc'))}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        if parts[0] == "restock" and len(parts) >= 2:
+            enabled = parts[1] == "on"
+            restock_state["enabled"] = enabled
+            restock_state["chat_id"] = str(query.message.chat_id)
+            if enabled:
+                restock_state["snapshot"] = {}
+            save_restock_state()
+            if enabled and not restock_running:
+                restock_running = True
+                asyncio.ensure_future(restock_monitor_loop())
+            await query.edit_message_text(
+                "✅ 全机型补货通知已启用，正在建立库存基线；后续补货会附带下单按钮。"
+                if enabled else "⏹ 全机型补货通知已停用。"
+            )
+            return
 
         if parts[0] == "buy" and len(parts) >= 3 and parts[1] == "preset":
             plan_code = resolve_plan_code(parts[2])
@@ -4065,12 +4271,13 @@ def run_bot(cfg: dict):
                     await query.edit_message_text("📭 当前没有监控任务")
                     return
                 keyboard = []
-                for pc, task in watch_tasks.items():
+                for task_id, task in watch_tasks.items():
+                    plan_code = task.get("plan_code", task_id)
                     status_icon = "🟢" if task.get("active") else "🔴"
                     keyboard.append([
                         InlineKeyboardButton(
-                            f"{status_icon} {pc} ({task.get('ordered', 0)}/{task.get('max_orders', 1)})",
-                            callback_data=f"watchlist|task|{pc}"
+                            f"{status_icon} {friendly_plan_name(plan_code)} · {format_storage(task.get('storage'))} ({task.get('ordered', 0)}/{task.get('max_orders', 1)})",
+                            callback_data=f"watchlist|task|{task_id}"
                         )
                     ])
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
@@ -4081,8 +4288,9 @@ def run_bot(cfg: dict):
                 return
 
             if len(parts) >= 3 and parts[1] == "task":
-                plan_code = parts[2]
-                task = watch_tasks.get(plan_code)
+                task_id = parts[2]
+                task = watch_tasks.get(task_id)
+                plan_code = task.get("plan_code", task_id) if task else task_id
                 if not task:
                     await query.edit_message_text("❌ 监控任务不存在或已删除")
                     return
@@ -4098,17 +4306,17 @@ def run_bot(cfg: dict):
                     filter_parts.append(f"内存={format_memory(task['memory'])}")
                 action_btn = InlineKeyboardButton(
                     "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
-                    callback_data=f"watchlist|toggle|{plan_code}"
+                    callback_data=f"watchlist|toggle|{task_id}"
                 )
                 mode_btn = InlineKeyboardButton(
                     "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
-                    callback_data=f"watchlist|mode|{plan_code}"
+                    callback_data=f"watchlist|mode|{task_id}"
                 )
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
-                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{plan_code}")],
-                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
+                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
+                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
                 await query.edit_message_text(
@@ -4119,13 +4327,14 @@ def run_bot(cfg: dict):
                 return
 
             if len(parts) >= 3 and parts[1] == "count":
-                plan_code = parts[2]
-                task = watch_tasks.get(plan_code)
+                task_id = parts[2]
+                task = watch_tasks.get(task_id)
+                plan_code = task.get("plan_code", task_id) if task else task_id
                 if not task:
                     await query.edit_message_text("❌ 监控任务不存在或已删除")
                     return
                 context.user_data["watch_count_edit"] = {
-                    "plan_code": plan_code,
+                    "task_id": task_id,
                     "message": query.message,
                 }
                 await query.edit_message_text(
@@ -4138,15 +4347,16 @@ def run_bot(cfg: dict):
                     f"可设置范围：1–100 单",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("⬅️ 返回任务", callback_data=f"watchlist|task|{plan_code}"),
+                        InlineKeyboardButton("⬅️ 返回任务", callback_data=f"watchlist|task|{task_id}"),
                         InlineKeyboardButton("取消", callback_data="cancel"),
                     ]]),
                 )
                 return
 
             if len(parts) >= 3 and parts[1] == "toggle":
-                plan_code = parts[2]
-                task = watch_tasks.get(plan_code)
+                task_id = parts[2]
+                task = watch_tasks.get(task_id)
+                plan_code = task.get("plan_code", task_id) if task else task_id
                 if not task:
                     await query.edit_message_text("❌ 监控任务不存在或已删除")
                     return
@@ -4166,8 +4376,8 @@ def run_bot(cfg: dict):
                     asyncio.ensure_future(watch_monitor_loop())
                 status_text = "已启用" if task["active"] else "已暂停"
                 await query.answer(f"{plan_code} {status_text}")
-                parts = ["watchlist", "task", plan_code]
-                task = watch_tasks.get(plan_code)
+                parts = ["watchlist", "task", task_id]
+                task = watch_tasks.get(task_id)
                 status = "🟢 监控中" if task.get("active") else "🔴 已暂停"
                 filter_parts = []
                 if task.get("dc"):
@@ -4180,17 +4390,17 @@ def run_bot(cfg: dict):
                     filter_parts.append(f"内存={format_memory(task['memory'])}")
                 action_btn = InlineKeyboardButton(
                     "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
-                    callback_data=f"watchlist|toggle|{plan_code}"
+                    callback_data=f"watchlist|toggle|{task_id}"
                 )
                 mode_btn = InlineKeyboardButton(
                     "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
-                    callback_data=f"watchlist|mode|{plan_code}"
+                    callback_data=f"watchlist|mode|{task_id}"
                 )
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
-                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{plan_code}")],
-                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
+                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
+                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
                 await query.edit_message_text(
@@ -4201,8 +4411,9 @@ def run_bot(cfg: dict):
                 return
 
             if len(parts) >= 3 and parts[1] == "mode":
-                plan_code = parts[2]
-                task = watch_tasks.get(plan_code)
+                task_id = parts[2]
+                task = watch_tasks.get(task_id)
+                plan_code = task.get("plan_code", task_id) if task else task_id
                 if not task:
                     await query.edit_message_text("❌ 监控任务不存在或已删除")
                     return
@@ -4225,17 +4436,17 @@ def run_bot(cfg: dict):
                     filter_parts.append(f"内存={format_memory(task['memory'])}")
                 action_btn = InlineKeyboardButton(
                     "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
-                    callback_data=f"watchlist|toggle|{plan_code}"
+                    callback_data=f"watchlist|toggle|{task_id}"
                 )
                 mode_btn = InlineKeyboardButton(
                     "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
-                    callback_data=f"watchlist|mode|{plan_code}"
+                    callback_data=f"watchlist|mode|{task_id}"
                 )
                 keyboard = InlineKeyboardMarkup([
                     [action_btn],
                     [mode_btn],
-                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{plan_code}")],
-                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
+                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
+                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
                 ])
                 await query.edit_message_text(
@@ -4246,25 +4457,27 @@ def run_bot(cfg: dict):
                 return
 
             if len(parts) >= 3 and parts[1] == "delete":
-                plan_code = parts[2]
-                task = watch_tasks.get(plan_code)
+                task_id = parts[2]
+                task = watch_tasks.get(task_id)
+                plan_code = task.get("plan_code", task_id) if task else task_id
                 if not task:
                     await query.edit_message_text("❌ 监控任务不存在或已删除")
                     return
                 task["active"] = False
-                del watch_tasks[plan_code]
+                del watch_tasks[task_id]
                 save_watch_tasks()
                 await query.answer(f"已删除 {plan_code}")
                 if not watch_tasks:
                     await query.edit_message_text("📭 当前没有监控任务")
                     return
                 keyboard = []
-                for pc, t in watch_tasks.items():
+                for task_id, t in watch_tasks.items():
+                    plan_code = t.get("plan_code", task_id)
                     status_icon = "🟢" if t.get("active") else "🔴"
                     keyboard.append([
                         InlineKeyboardButton(
-                            f"{status_icon} {pc} ({t.get('ordered', 0)}/{t.get('max_orders', 1)})",
-                            callback_data=f"watchlist|task|{pc}"
+                            f"{status_icon} {friendly_plan_name(plan_code)} · {format_storage(t.get('storage'))} ({t.get('ordered', 0)}/{t.get('max_orders', 1)})",
+                            callback_data=f"watchlist|task|{task_id}"
                         )
                     ])
                 keyboard.append([InlineKeyboardButton("取消", callback_data="cancel")])
@@ -4498,7 +4711,9 @@ def run_bot(cfg: dict):
             elif action["type"] == "watch_start":
                 try:
                     plan_code = action["plan_code"]
-                    watch_tasks[plan_code] = {
+                    task_id = str(int(time.time() * 1000000))[-14:]
+                    watch_tasks[task_id] = {
+                        "plan_code": plan_code,
                         "dc": action.get("dc"),
                         "excluded_dcs": action.get("excluded_dcs", []),
                         "storage": action.get("storage"),
@@ -4752,8 +4967,9 @@ def run_bot(cfg: dict):
 
         count_edit = context.user_data.get("watch_count_edit")
         if count_edit:
-            plan_code = count_edit["plan_code"]
-            task = watch_tasks.get(plan_code)
+            task_id = count_edit["task_id"]
+            task = watch_tasks.get(task_id)
+            plan_code = task.get("plan_code", task_id) if task else task_id
             if not task:
                 context.user_data.pop("watch_count_edit", None)
                 await update.message.reply_text("❌ 监控任务不存在或已删除")
@@ -4791,17 +5007,17 @@ def run_bot(cfg: dict):
                 filter_parts.append(f"内存={format_memory(task['memory'])}")
             action_btn = InlineKeyboardButton(
                 "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
-                callback_data=f"watchlist|toggle|{plan_code}",
+                callback_data=f"watchlist|toggle|{task_id}",
             )
             mode_btn = InlineKeyboardButton(
                 "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
-                callback_data=f"watchlist|mode|{plan_code}",
+                callback_data=f"watchlist|mode|{task_id}",
             )
             keyboard = InlineKeyboardMarkup([
                 [action_btn],
                 [mode_btn],
-                [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{plan_code}")],
-                [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{plan_code}")],
+                [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
+                [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                 [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
             ])
             result_text = (
@@ -4938,9 +5154,27 @@ def run_bot(cfg: dict):
         except Exception as exc:
             logger.warning(f"删除用户命令消息失败: {exc}")
 
+    async def restore_background_monitors(application):
+        nonlocal watch_running, restock_running
+        if restock_state.get("enabled"):
+            restock_running = True
+            application.create_task(restock_monitor_loop())
+            logger.info("恢复全机型补货通知")
+        active_count = sum(1 for task in watch_tasks.values() if task.get("active"))
+        if active_count:
+            watch_running = True
+            application.create_task(watch_monitor_loop())
+            logger.info(f"恢复 {active_count} 个监控任务，自动启动监控循环")
+
     # ---- 构建 Bot ----
     # OVH 请求较慢时仍允许 Telegram 按钮回调及时进入，避免 callback query 过期。
-    app = ApplicationBuilder().token(bot_token).concurrent_updates(4).build()
+    app = (
+        ApplicationBuilder()
+        .token(bot_token)
+        .concurrent_updates(4)
+        .post_init(restore_background_monitors)
+        .build()
+    )
     bot_app = app
 
     app.add_handler(CommandHandler("start", start_cmd))
@@ -4956,6 +5190,7 @@ def run_bot(cfg: dict):
     app.add_handler(CommandHandler("watch", watch_cmd))
     app.add_handler(CommandHandler("unwatch", unwatch_cmd))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
+    app.add_handler(CommandHandler("restock", restock_cmd))
     app.add_handler(CommandHandler("servers", servers_cmd))
     app.add_handler(CommandHandler("keys", keys_cmd))
     app.add_handler(CommandHandler("reinstall", reinstall_cmd))
@@ -4963,14 +5198,6 @@ def run_bot(cfg: dict):
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.COMMAND, delete_command_message), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # 如果有恢复的监控任务，自动启动监控循环
-    if watch_tasks:
-        active_count = sum(1 for t in watch_tasks.values() if t.get("active"))
-        if active_count > 0:
-            watch_running = True
-            asyncio.ensure_future(watch_monitor_loop())
-            logger.info(f"恢复 {active_count} 个监控任务，自动启动监控循环")
 
     logger.info(f"🤖 OVH 抢购 Bot v2 启动 (区域: {ovh_client.zone}/{ovh_client.subsidiary})")
     app.run_polling()
