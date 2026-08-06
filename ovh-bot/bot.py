@@ -1930,6 +1930,16 @@ def find_restock_events(previous: dict, current: dict) -> list:
     ]
 
 
+def parse_server_available_email(subject: str) -> str | None:
+    """从 OVH 发货邮件主题提取服务器名称。"""
+    match = re.search(
+        r"Your\s+(\S+\.ip-[\w.-]+)\s+dedicated server is available!",
+        str(subject or ""),
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
 def parse_plan_code(text: str):
     """从文本中提取 planCode（兼容旧调用，内部使用 resolve_plan_code）"""
     text_lower = text.lower()
@@ -2226,6 +2236,7 @@ def run_bot(cfg: dict):
     DATA_DIR = _os.environ.get("OVH_BOT_DATA_DIR") or str(Path(__file__).parent / "data")
     WATCH_FILE = _os.path.join(DATA_DIR, "watch_tasks.json")
     RESTOCK_FILE = _os.path.join(DATA_DIR, "restock_monitor.json")
+    DELIVERY_FILE = _os.path.join(DATA_DIR, "delivery_notifications.json")
     SERVER_NOTES_FILE = _os.path.join(DATA_DIR, "server_notes.json")
 
     def save_watch_tasks():
@@ -2289,6 +2300,34 @@ def run_bot(cfg: dict):
             logger.warning(f"加载全机型补货状态失败: {exc}")
 
     load_restock_state()
+
+    delivery_state = {"enabled": True, "chat_id": "", "seen_ids": []}
+
+    def save_delivery_state():
+        try:
+            _os.makedirs(DATA_DIR, exist_ok=True)
+            temp_file = DELIVERY_FILE + ".tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(delivery_state, f, ensure_ascii=False)
+                f.flush()
+                _os.fsync(f.fileno())
+            _os.replace(temp_file, DELIVERY_FILE)
+        except Exception as exc:
+            logger.warning(f"保存发货通知状态失败: {exc}")
+
+    def load_delivery_state():
+        try:
+            if not _os.path.exists(DELIVERY_FILE):
+                return
+            with open(DELIVERY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                delivery_state.update(data)
+                delivery_state["seen_ids"] = list(delivery_state.get("seen_ids", []))[-2000:]
+        except Exception as exc:
+            logger.warning(f"加载发货通知状态失败: {exc}")
+
+    load_delivery_state()
 
     def save_server_notes():
         """原子保存服务器备注。"""
@@ -2452,6 +2491,64 @@ def run_bot(cfg: dict):
                 logger.error(f"监控循环出错: {e}")
 
             await asyncio.sleep(10)  # 每 10 秒检查一次
+
+    async def delivery_notification_loop():
+        """轮询 OVH 邮件历史，发现新主机发货后打开安装入口。"""
+        while delivery_state.get("enabled"):
+            try:
+                ids = await asyncio.to_thread(ovh_client.get, "/me/notification/email/history")
+                ids = [int(value) for value in ids if str(value).isdigit()]
+                seen = {int(value) for value in delivery_state.get("seen_ids", []) if str(value).isdigit()}
+                if not seen:
+                    delivery_state["seen_ids"] = ids[-2000:]
+                    save_delivery_state()
+                else:
+                    new_ids = sorted(set(ids) - seen)
+                    for notification_id in new_ids:
+                        item = await asyncio.to_thread(
+                            ovh_client.get, f"/me/notification/email/history/{notification_id}"
+                        )
+                        service_name = parse_server_available_email(item.get("subject", ""))
+                        if not service_name:
+                            continue
+                        try:
+                            info = await asyncio.to_thread(ovh_client.get_server_info, service_name)
+                            hardware = await asyncio.to_thread(ovh_client.get_server_hardware, service_name)
+                            disk_groups = extract_installable_disk_groups(hardware)
+                            default_group = hardware.get("defaultDiskGroupId") if isinstance(hardware, dict) else None
+                            action_id = f"delivery_{notification_id}"
+                            pending_actions[action_id] = {
+                                "type": "server", "service_name": service_name,
+                                "index": 0, "ip": info.get("ip", ""),
+                                "disk_groups": disk_groups, "default_group": default_group,
+                            }
+                            text = (
+                                f"🆕 *新服务器已发货*\n\n"
+                                f"🖥️ 服务器: `{service_name}`\n"
+                                f"📦 型号: `{info.get('commercialRange', '?')}`\n"
+                                f"📍 机房: `{info.get('datacenter', '?')}`\n"
+                                + (f"🌐 IP: `{info.get('ip')}`\n" if info.get("ip") else "")
+                                + "\n请选择后续操作："
+                            )
+                            rows = selected_server_action_specs(
+                                action_id,
+                                bool(select_default_raid_group(disk_groups, default_group)),
+                                get_server_note(service_name) == "没中",
+                            )
+                            await bot_app.bot.send_message(
+                                chat_id=str(delivery_state.get("chat_id") or tg_cfg.get("chat_id", "")),
+                                text=text, parse_mode="Markdown",
+                                reply_markup=InlineKeyboardMarkup([
+                                    [InlineKeyboardButton(**button) for button in row] for row in rows
+                                ]),
+                            )
+                        except Exception as exc:
+                            logger.error(f"处理新发货服务器 {service_name} 失败: {exc}")
+                    delivery_state["seen_ids"] = ids[-2000:]
+                    save_delivery_state()
+            except Exception as exc:
+                logger.error(f"读取 OVH 发货邮件通知失败: {exc}")
+            await asyncio.sleep(60)
 
     async def restock_monitor_loop():
         """单次请求扫描 Eco 全机型，仅通知无货→有货变化。"""
@@ -5239,6 +5336,9 @@ def run_bot(cfg: dict):
             BotCommand("keys", "查看 SSH 密钥"),
             BotCommand("catalog", "查看服务器目录"),
         ])
+        if delivery_state.get("enabled"):
+            asyncio.create_task(delivery_notification_loop())
+            logger.info("恢复新主机发货邮件通知")
         if restock_state.get("enabled"):
             restock_running = True
             asyncio.create_task(restock_monitor_loop())

@@ -710,6 +710,21 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn('BotCommand("restock", "全机型补货通知")', source)
         self.assertIn("await application.bot.set_my_commands", source)
 
+    def test_delivery_email_subject_extracts_server(self):
+        self.assertEqual(
+            bot.parse_server_available_email(
+                "[jd219982-ovh] Your ns31257627.ip-57-129-101.eu dedicated server is available!"
+            ),
+            "ns31257627.ip-57-129-101.eu",
+        )
+        self.assertIsNone(bot.parse_server_available_email("Order validated"))
+
+    def test_delivery_monitor_uses_persistent_seen_ids(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('DELIVERY_FILE =', source)
+        self.assertIn('ovh_client.get, "/me/notification/email/history"', source)
+        self.assertIn("恢复新主机发货邮件通知", source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)
