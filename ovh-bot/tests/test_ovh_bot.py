@@ -725,6 +725,13 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn('ovh_client.get, "/me/notification/email/history"', source)
         self.assertIn("恢复新主机发货邮件通知", source)
 
+    def test_delivery_notification_uses_two_entry_buttons(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('InlineKeyboardButton("🛠️ 安装系统"', source)
+        self.assertIn('InlineKeyboardButton("📋 查看服务器"', source)
+        self.assertIn('if parts[0] == "delivery"', source)
+        self.assertIn('"📋 *服务器详情*\\n"', source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)

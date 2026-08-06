@@ -2520,6 +2520,10 @@ def run_bot(cfg: dict):
                             pending_actions[action_id] = {
                                 "type": "server", "service_name": service_name,
                                 "index": 0, "ip": info.get("ip", ""),
+                                "commercial_range": info.get("commercialRange", "?"),
+                                "datacenter": info.get("datacenter", "?"),
+                                "os": info.get("os", "?"),
+                                "state": info.get("state", "?"),
                                 "disk_groups": disk_groups, "default_group": default_group,
                             }
                             text = (
@@ -2530,16 +2534,12 @@ def run_bot(cfg: dict):
                                 + (f"🌐 IP: `{info.get('ip')}`\n" if info.get("ip") else "")
                                 + "\n请选择后续操作："
                             )
-                            rows = selected_server_action_specs(
-                                action_id,
-                                bool(select_default_raid_group(disk_groups, default_group)),
-                                get_server_note(service_name) == "没中",
-                            )
                             await bot_app.bot.send_message(
                                 chat_id=str(delivery_state.get("chat_id") or tg_cfg.get("chat_id", "")),
                                 text=text, parse_mode="Markdown",
                                 reply_markup=InlineKeyboardMarkup([
-                                    [InlineKeyboardButton(**button) for button in row] for row in rows
+                                    [InlineKeyboardButton("🛠️ 安装系统", callback_data=f"delivery|install|{action_id}")],
+                                    [InlineKeyboardButton("📋 查看服务器", callback_data=f"delivery|view|{action_id}")],
                                 ]),
                             )
                         except Exception as exc:
@@ -3487,6 +3487,80 @@ def run_bot(cfg: dict):
         parts = data.split("|")
         context.user_data.pop("watch_count_edit", None)
         context.user_data.pop("watch_count_create", None)
+
+        if parts[0] == "delivery" and len(parts) >= 3:
+            op = parts[1]
+            action_id = parts[2]
+            action = pending_actions.get(action_id)
+            if not action:
+                await query.edit_message_text("❌ 发货通知操作已过期，请使用 `/servers`", parse_mode="Markdown")
+                return
+            service_name = action["service_name"]
+            if op == "install":
+                rows = [
+                    [InlineKeyboardButton(**button) for button in row]
+                    for row in selected_server_action_specs(
+                        action_id,
+                        bool(select_default_raid_group(
+                            action.get("disk_groups", []), action.get("default_group")
+                        )),
+                        get_server_note(service_name) == "没中",
+                    )
+                    if not any("备注" in button.get("text", "") for button in row)
+                ]
+                rows.append([
+                    InlineKeyboardButton("⬅️ 返回", callback_data=f"delivery|home|{action_id}"),
+                    InlineKeyboardButton("取消", callback_data="cancel"),
+                ])
+                await query.edit_message_text(
+                    f"🛠️ *安装系统*\n\n"
+                    f"🖥️ 服务器: `{service_name}`\n"
+                    + (f"🌐 IP: `{action.get('ip')}`\n" if action.get("ip") else "")
+                    + "\n请选择安装方式：",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+            elif op == "view":
+                lines = [
+                    "📋 *服务器详情*\n",
+                    f"🖥️ 服务器: `{service_name}`",
+                    f"📦 型号: `{action.get('commercial_range', '?')}`",
+                    f"💻 系统: `{action.get('os', '?')}`",
+                    f"📍 机房: `{action.get('datacenter', '?')}`",
+                    f"🟢 状态: `{action.get('state', '?')}`",
+                ]
+                if action.get("ip"):
+                    lines.append(f"🌐 IP: `{action['ip']}`")
+                groups = action.get("disk_groups", [])
+                if groups:
+                    lines.append("💾 安装盘组：")
+                    lines.extend(
+                        f"　{format_disk_group(group, action.get('default_group'))}"
+                        for group in groups
+                    )
+                await query.edit_message_text(
+                    "\n".join(lines), parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ 返回", callback_data=f"delivery|home|{action_id}"),
+                        InlineKeyboardButton("取消", callback_data="cancel"),
+                    ]]),
+                )
+            elif op == "home":
+                text = (
+                    f"🆕 *新服务器已发货*\n\n"
+                    f"🖥️ `{service_name}`\n"
+                    f"📦 型号: `{action.get('commercial_range', '?')}`\n"
+                    f"📍 机房: `{action.get('datacenter', '?')}`\n"
+                    + (f"🌐 IP: `{action.get('ip')}`\n" if action.get("ip") else "")
+                )
+                await query.edit_message_text(
+                    text, parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🛠️ 安装系统", callback_data=f"delivery|install|{action_id}")],
+                        [InlineKeyboardButton("📋 查看服务器", callback_data=f"delivery|view|{action_id}")],
+                    ]),
+                )
+            return
 
         if parts[0] == "restockbuy" and len(parts) >= 2:
             item = restock_buy_sessions.get(parts[1])
