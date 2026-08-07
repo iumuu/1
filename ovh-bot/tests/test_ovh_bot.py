@@ -734,6 +734,11 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn('disk_lines = "💾 硬盘:\\n"', source)
         self.assertIn("format_disk_group(group, default_group)", source)
 
+    def test_out_of_stock_buy_failure_does_not_expand_all_configs(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('is_out_of_stock = "无货" in error_text', source)
+        self.assertIn('result.get("all_configs") and not is_out_of_stock', source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)

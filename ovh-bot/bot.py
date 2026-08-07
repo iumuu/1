@@ -5379,8 +5379,10 @@ def run_bot(cfg: dict):
             text += f"❗ 错误: {result['error']}\n"
             text += f"⏱️ 耗时: {result['elapsed']}s"
 
-            # 如果有所有配置信息，显示
-            if result.get("all_configs"):
+            # 指定配置无货时保持消息简短，不展开全部配置和机房状态。
+            error_text = str(result.get("error", ""))
+            is_out_of_stock = "无货" in error_text or "unavailable" in error_text.lower()
+            if result.get("all_configs") and not is_out_of_stock:
                 text += "\n\n📊 *所有配置状态:*\n"
                 for cfg in result["all_configs"]:
                     mem = format_memory(cfg["memory"])
