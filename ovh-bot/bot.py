@@ -1459,6 +1459,12 @@ class OVHClient:
         detail = self.get(f"/me/sshKey/{key_name}")
         return detail.get("key")
 
+    def create_ssh_key(self, key_name: str, public_key: str, key_type: str = "ed25519") -> dict:
+        """将公钥添加到 OVH 账号；绝不上传私钥。"""
+        return self.post(
+            "/me/sshKey", keyName=key_name, key=public_key, type=key_type
+        )
+
     def reinstall_server(self, service_name: str, template: str, hostname: str = None,
                          ssh_key_name: str = None, raid0: bool = False,
                          raid_disks: int = None, disk_group_id: int = None,
@@ -3202,17 +3208,18 @@ def run_bot(cfg: dict):
             await msg.edit_text(f"❌ 获取失败: {e}")
 
     async def keys_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """列出 OVH 预设 SSH 密钥"""
+        """列出并添加 OVH 预设 SSH 密钥。"""
         if not check_user(update.effective_user.id):
             return
         try:
             keys = await asyncio.to_thread(ovh_client.list_ssh_keys)
-            if not keys:
-                await update.message.reply_text("📭 OVH 账号里没有预设 SSH 密钥")
-                return
-            text = "🔑 *OVH 预设 SSH 密钥*\n\n" + "\n".join(f"• `{k}`" for k in keys)
-            text += "\n\n💡 安装系统请用 /servers 按钮流程选择密钥"
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel")]])
+            text = "🔑 *OVH 预设 SSH 密钥*\n\n"
+            text += "\n".join(f"• `{k}`" for k in keys) if keys else "📭 当前没有预设 SSH 密钥"
+            text += "\n\n💡 只上传公钥，私钥不会上传或保存。"
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ 添加 SSH 公钥", callback_data="sshkey|add")],
+                [InlineKeyboardButton("取消", callback_data="cancel")],
+            ])
             await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:
             await update.message.reply_text(f"❌ 获取密钥失败: {e}")
@@ -3500,6 +3507,17 @@ def run_bot(cfg: dict):
         parts = data.split("|")
         context.user_data.pop("watch_count_edit", None)
         context.user_data.pop("watch_count_create", None)
+        if parts[0] == "cancel":
+            context.user_data.pop("sshkey_add", None)
+
+        if parts[0] == "sshkey" and len(parts) >= 2 and parts[1] == "add":
+            context.user_data["sshkey_add"] = {"stage": "name", "message": query.message}
+            await query.edit_message_text(
+                "➕ *添加 OVH SSH 公钥*\n\n请发送密钥名称，例如：`home-mac`\n\n只发送名称，不要发送私钥。",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("取消", callback_data="cancel")]]),
+            )
+            return
 
         if parts[0] == "delivery" and len(parts) >= 3:
             op = parts[1]
@@ -5233,6 +5251,47 @@ def run_bot(cfg: dict):
 
         text = update.message.text or ""
         if not text.strip():
+            return
+
+        sshkey_add = context.user_data.get("sshkey_add")
+        if sshkey_add:
+            value = text.strip()
+            if sshkey_add.get("stage") == "name":
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}", value):
+                    await update.message.reply_text("❌ 名称只能包含字母、数字、点、下划线和短横线，最多 32 个字符，请重新发送")
+                    return
+                sshkey_add["name"] = value
+                sshkey_add["stage"] = "key"
+                await update.message.reply_text(
+                    f"🔑 名称已记录：`{value}`\n\n请现在发送 SSH 公钥（以 `ssh-ed25519` 或 `ssh-rsa` 开头）。\n私钥内容会被拒绝。",
+                    parse_mode="Markdown",
+                )
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
+                return
+            if value.startswith("-----BEGIN") or "PRIVATE KEY" in value.upper():
+                await update.message.reply_text("❌ 检测到私钥内容。这里只能发送公钥，请重新发送。")
+                return
+            public_parts = value.split()
+            if len(public_parts) < 2 or public_parts[0] not in {"ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"}:
+                await update.message.reply_text("❌ 公钥格式无效，请发送 ssh-ed25519、ssh-rsa 或 ecdsa 公钥。")
+                return
+            key_name = sshkey_add["name"]
+            key_type = "rsa" if public_parts[0] == "ssh-rsa" else "ed25519"
+            try:
+                await asyncio.to_thread(ovh_client.create_ssh_key, key_name, value, key_type)
+                context.user_data.pop("sshkey_add", None)
+                keys = await asyncio.to_thread(ovh_client.list_ssh_keys)
+                text_out = "✅ SSH 公钥已添加到 OVH\n\n🔑 *当前 SSH 密钥*\n\n" + "\n".join(f"• `{k}`" for k in keys)
+                await update.message.reply_text(text_out, parse_mode="Markdown")
+            except Exception as exc:
+                await update.message.reply_text(f"❌ 添加 SSH 公钥失败: {exc}")
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
             return
 
         create_count = context.user_data.get("watch_count_create")

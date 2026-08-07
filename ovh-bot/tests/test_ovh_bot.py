@@ -748,6 +748,13 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn('order = self.checkout(cart_id, auto_pay=auto_pay)', source)
         self.assertIn('"auto_pay": False', source)
 
+    def test_create_ssh_key_uses_public_key_api(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('self.post(\n            "/me/sshKey"', source)
+        self.assertIn('callback_data="sshkey|add"', source)
+        self.assertIn('context.user_data["sshkey_add"]', source)
+        self.assertIn('"PRIVATE KEY" in value.upper()', source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)
