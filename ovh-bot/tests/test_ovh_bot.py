@@ -667,7 +667,8 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn("32GB", lines[3])
         self.assertTrue(lines[3].startswith("💾 配置: "))
         self.assertEqual(lines[4], "⚙️ 模式: 🚀 自动下单")
-        self.assertEqual(lines[5], "📊 进度: 0/5 单")
+        self.assertEqual(lines[5], "💳 自动付款: 🔴 已关闭")
+        self.assertEqual(lines[6], "📊 进度: 0/5 单")
 
     def test_restock_snapshot_only_reports_unavailable_to_available(self):
         rows_down = [{
@@ -738,6 +739,14 @@ class WatchTaskModeTests(unittest.TestCase):
         source = Path(bot.__file__).read_text(encoding="utf-8")
         self.assertIn('is_out_of_stock = "无货" in error_text', source)
         self.assertIn('result.get("all_configs") and not is_out_of_stock', source)
+
+    def test_watch_autopay_is_task_scoped_and_confirmed(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('callback_data=f"watchlist|autopay|{task_id}"', source)
+        self.assertIn('callback_data=f"watchlist|autopayconfirm|{task_id}"', source)
+        self.assertIn('auto_pay=bool(task.get("auto_pay", False))', source)
+        self.assertIn('order = self.checkout(cart_id, auto_pay=auto_pay)', source)
+        self.assertIn('"auto_pay": False', source)
 
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)

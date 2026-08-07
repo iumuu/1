@@ -1515,7 +1515,8 @@ class OVHClient:
                   datacenter: str = None, os_name: str = None,
                   options: list = None, target_dc: str = None,
                   target_storage: str = None,
-                  target_memory: str = None) -> dict:
+                  target_memory: str = None,
+                  auto_pay: bool = False) -> dict:
         """
         一键抢购 - 支持指定存储和内存配置
 
@@ -1532,6 +1533,7 @@ class OVHClient:
             "cart_id": None,
             "order_id": None,
             "payment_url": None,
+            "auto_pay_requested": bool(auto_pay),
             "price": None,
             "error": None,
             "elapsed": 0,
@@ -1638,7 +1640,7 @@ class OVHClient:
 
             # 步骤 5: 结账
             if self.defaults.get("auto_checkout", True):
-                order = self.checkout(cart_id, auto_pay=False)
+                order = self.checkout(cart_id, auto_pay=auto_pay)
                 order_id = order.get("orderId")
                 if not order_id:
                     raise RuntimeError("OVH 结账响应缺少 orderId，订单状态未知，请检查购物车")
@@ -1890,6 +1892,7 @@ def format_watchlist_task(plan_code: str, task: dict) -> str:
         lines.append(f"💾 配置: {', '.join(hardware_parts)}")
 
     lines.append(f"⚙️ 模式: {watch_mode_label(task)}")
+    lines.append(f"💳 自动付款: {'🟢 已开启' if task.get('auto_pay') else '🔴 已关闭'}")
     lines.append(f"📊 进度: {task.get('ordered', 0)}/{task.get('max_orders', 1)} 单")
     return "\n".join(lines)
 
@@ -2445,6 +2448,7 @@ def run_bot(cfg: dict):
                                     datacenter=chosen["datacenter"],
                                     target_storage=chosen.get("storage") or task.get("storage"),
                                     target_memory=chosen.get("memory") or task.get("memory"),
+                                    auto_pay=bool(task.get("auto_pay", False)),
                                 )
 
                             if result["success"]:
@@ -2465,7 +2469,9 @@ def run_bot(cfg: dict):
                                     text += f"💰 价格: {p.get('withTax', '?')} {p.get('currencyCode', 'EUR')}\n"
                                 if result["order_id"]:
                                     text += f"📋 订单号: `{result['order_id']}`\n"
-                                if result["payment_url"]:
+                                if result.get("auto_pay_requested"):
+                                    text += "💳 自动付款: 已使用 OVH 首选付款方式发起请求\n"
+                                elif result["payment_url"]:
                                     text += f"💳 付款链接: {result['payment_url']}\n"
                                 text += f"\n📊 监控进度: 已下 {task['ordered']}/{task['max_orders']} 单"
                                 if task["ordered"] >= task["max_orders"]:
@@ -4497,6 +4503,10 @@ def run_bot(cfg: dict):
                     [action_btn],
                     [mode_btn],
                     [InlineKeyboardButton("📍 修改监控机房", callback_data=f"watchlist|dcs|{task_id}")],
+                    [InlineKeyboardButton(
+                        "💳 关闭自动付款" if task.get("auto_pay") else "💳 开启自动付款",
+                        callback_data=f"watchlist|autopay|{task_id}",
+                    )],
                     [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
@@ -4505,6 +4515,57 @@ def run_bot(cfg: dict):
                     f"⚙️ 管理监控任务\n\n{format_watchlist_task(plan_code, task)}",
                     parse_mode="Markdown",
                     reply_markup=keyboard
+                )
+                return
+
+            if len(parts) >= 3 and parts[1] in {"autopay", "autopayconfirm"}:
+                task_id = parts[2]
+                task = watch_tasks.get(task_id)
+                plan_code = task.get("plan_code", task_id) if task else task_id
+                if not task:
+                    await query.edit_message_text("❌ 监控任务不存在或已删除")
+                    return
+                if parts[1] == "autopay" and not task.get("auto_pay"):
+                    await query.edit_message_text(
+                        f"⚠️ *确认开启自动付款*\n\n"
+                        f"📦 型号: {friendly_plan_name(plan_code)} (`{plan_code}`)\n"
+                        f"💾 配置: {format_memory(task.get('memory'))} + {format_storage(task.get('storage'))}\n\n"
+                        f"监控抢购成功时，将使用 OVH 首选付款方式请求自动扣款。\n"
+                        f"该设置只对当前监控任务生效。",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("⚠️ 确认开启自动付款", callback_data=f"watchlist|autopayconfirm|{task_id}")],
+                            [InlineKeyboardButton("⬅️ 返回任务", callback_data=f"watchlist|task|{task_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                        ]),
+                    )
+                    return
+                task["auto_pay"] = parts[1] == "autopayconfirm"
+                task["chat_id"] = str(query.message.chat_id)
+                save_watch_tasks()
+                await query.answer("自动付款已开启" if task["auto_pay"] else "自动付款已关闭")
+                parts = ["watchlist", "task", task_id]
+                action_btn = InlineKeyboardButton(
+                    "⏸ 暂停监控" if task.get("active") else "▶️ 启用监控",
+                    callback_data=f"watchlist|toggle|{task_id}",
+                )
+                mode_btn = InlineKeyboardButton(
+                    "🔔 改为仅通知" if watch_auto_buy_enabled(task) else "🚀 改为自动下单",
+                    callback_data=f"watchlist|mode|{task_id}",
+                )
+                keyboard = InlineKeyboardMarkup([
+                    [action_btn], [mode_btn],
+                    [InlineKeyboardButton("📍 修改监控机房", callback_data=f"watchlist|dcs|{task_id}")],
+                    [InlineKeyboardButton(
+                        "💳 关闭自动付款" if task.get("auto_pay") else "💳 开启自动付款",
+                        callback_data=f"watchlist|autopay|{task_id}",
+                    )],
+                    [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
+                    [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
+                    [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
+                ])
+                await query.edit_message_text(
+                    f"⚙️ 管理监控任务\n\n{format_watchlist_task(plan_code, task)}",
+                    parse_mode="Markdown", reply_markup=keyboard,
                 )
                 return
 
@@ -4644,6 +4705,10 @@ def run_bot(cfg: dict):
                     [action_btn],
                     [mode_btn],
                     [InlineKeyboardButton("📍 修改监控机房", callback_data=f"watchlist|dcs|{task_id}")],
+                    [InlineKeyboardButton(
+                        "💳 关闭自动付款" if task.get("auto_pay") else "💳 开启自动付款",
+                        callback_data=f"watchlist|autopay|{task_id}",
+                    )],
                     [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
@@ -4691,6 +4756,10 @@ def run_bot(cfg: dict):
                     [action_btn],
                     [mode_btn],
                     [InlineKeyboardButton("📍 修改监控机房", callback_data=f"watchlist|dcs|{task_id}")],
+                    [InlineKeyboardButton(
+                        "💳 关闭自动付款" if task.get("auto_pay") else "💳 开启自动付款",
+                        callback_data=f"watchlist|autopay|{task_id}",
+                    )],
                     [InlineKeyboardButton("🎯 重新设置下单数量", callback_data=f"watchlist|count|{task_id}")],
                     [InlineKeyboardButton("🗑 删除监控", callback_data=f"watchlist|delete|{task_id}")],
                     [InlineKeyboardButton("⬅️ 返回任务列表", callback_data="watchlist|manage"), InlineKeyboardButton("取消", callback_data="cancel")],
@@ -4966,6 +5035,7 @@ def run_bot(cfg: dict):
                         "storage": action.get("storage"),
                         "memory": action.get("memory"),
                         "auto_buy": action.get("auto_buy", True),
+                        "auto_pay": False,
                         "max_orders": action.get("max_orders", 1),
                         "ordered": 0,
                         "active": True,
