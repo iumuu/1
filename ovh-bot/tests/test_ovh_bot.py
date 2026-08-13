@@ -755,6 +755,13 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn('context.user_data["sshkey_add"]', source)
         self.assertIn('"PRIVATE KEY" in value.upper()', source)
 
+    def test_delivery_notification_displays_memory(self):
+        self.assertEqual(bot.format_hardware_memory({"value": 32768, "unit": "MB"}), "32GB")
+        self.assertEqual(bot.format_hardware_memory({"value": 65536, "unit": "MB"}), "64GB")
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn("🧠 内存:", source)
+        self.assertIn('hardware.get("memorySize")', source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)

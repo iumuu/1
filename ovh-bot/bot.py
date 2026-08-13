@@ -344,6 +344,25 @@ def format_storage(storage: str) -> str:
     return storage
 
 
+def format_hardware_memory(memory_size) -> str:
+    """格式化 OVH specifications/hardware.memorySize。"""
+    if not isinstance(memory_size, dict):
+        return ""
+    value = memory_size.get("value")
+    unit = str(memory_size.get("unit", "")).upper()
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if unit == "MB" and number >= 1024:
+        gb = number / 1024
+        return f"{int(gb) if gb.is_integer() else gb:g}GB"
+    if unit == "KB" and number >= 1024 * 1024:
+        gb = number / (1024 * 1024)
+        return f"{int(gb) if gb.is_integer() else gb:g}GB"
+    return f"{number:g}{unit}" if unit else f"{number:g}"
+
+
 def classify_disk_group(disk_group: dict) -> tuple[str, str, str]:
     """返回 (类别, 显示名称, 图标)，明确区分 SSD 与 HDD。"""
     raw_type = str(disk_group.get("diskType", "") or "").strip()
@@ -2536,6 +2555,7 @@ def run_bot(cfg: dict):
                                 "datacenter": info.get("datacenter", "?"),
                                 "os": info.get("os", "?"),
                                 "state": info.get("state", "?"),
+                                "memory": format_hardware_memory(hardware.get("memorySize")),
                                 "disk_groups": disk_groups, "default_group": default_group,
                             }
                             disk_lines = ""
@@ -2549,6 +2569,7 @@ def run_bot(cfg: dict):
                                 f"🖥️ 服务器: `{service_name}`\n"
                                 f"📦 型号: `{info.get('commercialRange', '?')}`\n"
                                 f"📍 机房: `{info.get('datacenter', '?')}`\n"
+                                + (f"🧠 内存: `{format_hardware_memory(hardware.get('memorySize'))}`\n" if format_hardware_memory(hardware.get("memorySize")) else "")
                                 + (f"🌐 IP: `{info.get('ip')}`\n" if info.get("ip") else "")
                                 + disk_lines
                                 + "\n请选择后续操作："
@@ -3558,6 +3579,7 @@ def run_bot(cfg: dict):
                     f"📦 型号: `{action.get('commercial_range', '?')}`",
                     f"💻 系统: `{action.get('os', '?')}`",
                     f"📍 机房: `{action.get('datacenter', '?')}`",
+                    *([f"🧠 内存: `{action.get('memory')}`"] if action.get("memory") else []),
                     f"🟢 状态: `{action.get('state', '?')}`",
                 ]
                 if action.get("ip"):
@@ -3582,6 +3604,7 @@ def run_bot(cfg: dict):
                     f"🖥️ `{service_name}`\n"
                     f"📦 型号: `{action.get('commercial_range', '?')}`\n"
                     f"📍 机房: `{action.get('datacenter', '?')}`\n"
+                    + (f"🧠 内存: `{action.get('memory')}`\n" if action.get("memory") else "")
                     + (f"🌐 IP: `{action.get('ip')}`\n" if action.get("ip") else "")
                 )
                 await query.edit_message_text(
