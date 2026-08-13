@@ -319,6 +319,7 @@ class ServerPaginationTests(unittest.TestCase):
             "srv|quick|srv2_123456",
             "srv|quick_noraid|srv2_123456",
             "srv|install|srv2_123456",
+            "srv|rescue|srv2_123456",
             "srvnote|miss|srv2_123456",
         ])
 
@@ -340,6 +341,7 @@ class ServerPaginationTests(unittest.TestCase):
         self.assertEqual(no_raid_callbacks, [
             "srv|quick_noraid|srv2_123456",
             "srv|install|srv2_123456",
+            "srv|rescue|srv2_123456",
             "srvnote|miss|srv2_123456",
         ])
 
@@ -761,6 +763,17 @@ class WatchTaskModeTests(unittest.TestCase):
         source = Path(bot.__file__).read_text(encoding="utf-8")
         self.assertIn("🧠 内存:", source)
         self.assertIn('hardware.get("memorySize")', source)
+
+    def test_rescue_mode_supports_key_or_mail_password(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('"text": "🛟 救援模式启动"', source)
+        self.assertIn('"rescueSshKey": public_key', source)
+        self.assertIn('"rescueMail": rescue_mail', source)
+        self.assertIn('action["type"] == "rescue_boot"', source)
+        self.assertIn("邮件接收 Rescue 密码", source)
+
+    def test_hardware_memory_format(self):
+        self.assertEqual(bot.format_hardware_memory({"value": 32768, "unit": "MB"}), "32GB")
 
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)

@@ -596,6 +596,10 @@ def selected_server_action_specs(
         "callback_data": f"srv|install|{action_id}",
     }])
     rows.append([{
+        "text": "🛟 救援模式启动",
+        "callback_data": f"srv|rescue|{action_id}",
+    }])
+    rows.append([{
         "text": "📝 清除“没中”备注" if has_miss_note else "📝 标记“没中”",
         "callback_data": f"srvnote|{'clear' if has_miss_note else 'miss'}|{action_id}",
     }])
@@ -1526,6 +1530,24 @@ class OVHClient:
     def reboot_server(self, service_name: str) -> dict:
         """硬重启服务器"""
         return self.post(f"/dedicated/server/{service_name}/reboot")
+
+    def get_rescue_boot(self, service_name: str) -> dict:
+        """获取服务器可用的 Rescue 启动项。"""
+        for boot_id in self.get(f"/dedicated/server/{service_name}/boot"):
+            boot = self.get(f"/dedicated/server/{service_name}/boot/{boot_id}")
+            if boot.get("bootType") == "rescue":
+                return boot
+        return {}
+
+    def set_rescue_boot(self, service_name: str, boot_id: int,
+                        public_key: str = None, rescue_mail: str = None) -> dict:
+        """设置下一次从 Rescue 启动，可使用 SSH 公钥或邮件密码。"""
+        body = {
+            "bootId": int(boot_id),
+            "rescueSshKey": public_key,
+            "rescueMail": rescue_mail,
+        }
+        return self.put(f"/dedicated/server/{service_name}", **body)
 
     def get_payment_url(self, order_id: int) -> str:
         """获取真实付款入口链接。finalPay 是未付款账单的直接付款页。"""
@@ -3530,6 +3552,7 @@ def run_bot(cfg: dict):
         context.user_data.pop("watch_count_create", None)
         if parts[0] == "cancel":
             context.user_data.pop("sshkey_add", None)
+            context.user_data.pop("rescue_mail", None)
 
         if parts[0] == "sshkey" and len(parts) >= 2 and parts[1] == "add":
             context.user_data["sshkey_add"] = {"stage": "name", "message": query.message}
@@ -4020,6 +4043,80 @@ def run_bot(cfg: dict):
                         [InlineKeyboardButton("⚠️ 确认一键安装", callback_data=f"act|{confirm_id}")],
                         [InlineKeyboardButton("⬅️ 手动选择", callback_data=f"srv|install|{action_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
                     ]),
+                )
+
+            elif op == "rescue":
+                try:
+                    rescue_boot = await asyncio.to_thread(ovh_client.get_rescue_boot, service_name)
+                    if not rescue_boot:
+                        await query.edit_message_text("❌ 该服务器没有可用的 Rescue 启动项")
+                        return
+                    action["rescue_boot_id"] = rescue_boot["bootId"]
+                    keys = await asyncio.to_thread(ovh_client.list_ssh_keys)
+                    keyboard = []
+                    for key_name in keys:
+                        keyboard.append([InlineKeyboardButton(
+                            f"🔑 SSH 密钥: {key_name}",
+                            callback_data=f"srv|rescuekey|{action_id}|{key_name}",
+                        )])
+                    keyboard.append([InlineKeyboardButton(
+                        "✉️ 邮件接收 Rescue 密码",
+                        callback_data=f"srv|rescuemail|{action_id}",
+                    )])
+                    keyboard.append([
+                        InlineKeyboardButton("⬅️ 返回服务器", callback_data=f"srv|select|{action_id}"),
+                        InlineKeyboardButton("取消", callback_data="cancel"),
+                    ])
+                    await query.edit_message_text(
+                        f"🛟 *救援模式启动*\n\n"
+                        f"🖥️ 服务器: `{service_name}`\n"
+                        f"💿 Rescue: `{rescue_boot.get('description', 'Rescue')}`\n\n"
+                        f"请选择认证方式：",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                except Exception as exc:
+                    await query.edit_message_text(f"❌ 获取 Rescue 启动项失败: {exc}")
+
+            elif op == "rescuekey" and len(parts) >= 4:
+                key_name = parts[3]
+                try:
+                    public_key = await asyncio.to_thread(ovh_client.get_ssh_key_value, key_name)
+                except Exception as exc:
+                    await query.edit_message_text(f"❌ 读取 SSH 公钥失败: {exc}")
+                    return
+                confirm_id = str(int(time.time() * 1000))[-10:]
+                pending_actions[confirm_id] = {
+                    "type": "rescue_boot", "service_name": service_name,
+                    "boot_id": action.get("rescue_boot_id"),
+                    "public_key": public_key, "key_name": key_name,
+                    "rescue_mail": None,
+                }
+                await query.edit_message_text(
+                    f"⚠️ *确认从救援模式启动*\n\n"
+                    f"🖥️ 服务器: `{service_name}`\n"
+                    f"🔑 登录方式: SSH 密钥 `{key_name}`\n\n"
+                    f"确认后会设置 Rescue 网络启动并立即重启服务器，当前业务将中断。",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⚠️ 确认进入 Rescue", callback_data=f"act|{confirm_id}")],
+                        [InlineKeyboardButton("⬅️ 返回", callback_data=f"srv|rescue|{action_id}"), InlineKeyboardButton("取消", callback_data="cancel")],
+                    ]),
+                )
+
+            elif op == "rescuemail":
+                context.user_data["rescue_mail"] = {
+                    "action_id": action_id, "message": query.message,
+                }
+                await query.edit_message_text(
+                    f"✉️ *邮件接收 Rescue 密码*\n\n"
+                    f"🖥️ 服务器: `{service_name}`\n\n"
+                    f"请发送接收 Rescue 密码的邮箱地址。",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ 返回", callback_data=f"srv|rescue|{action_id}"),
+                        InlineKeyboardButton("取消", callback_data="cancel"),
+                    ]]),
                 )
 
             elif op == "install":
@@ -5243,6 +5340,38 @@ def run_bot(cfg: dict):
                             ]]),
                         )
 
+            elif action["type"] == "rescue_boot":
+                service_name = action["service_name"]
+                await query.edit_message_text(f"⏳ 正在设置 `{service_name}` 从 Rescue 启动...")
+                try:
+                    await asyncio.to_thread(
+                        ovh_client.set_rescue_boot,
+                        service_name, action["boot_id"],
+                        action.get("public_key"), action.get("rescue_mail"),
+                    )
+                    await asyncio.to_thread(ovh_client.reboot_server, service_name)
+                    pending_actions.pop(action_id, None)
+                    auth_text = (
+                        f"SSH 密钥 `{action.get('key_name')}`"
+                        if action.get("public_key")
+                        else f"密码将发送到 `{action.get('rescue_mail')}`"
+                    )
+                    await query.edit_message_text(
+                        f"✅ *Rescue 启动指令已发送*\n\n"
+                        f"🖥️ 服务器: `{service_name}`\n"
+                        f"🔐 认证: {auth_text}\n"
+                        f"⏳ 服务器正在重启，稍后将从 Rescue 系统启动。",
+                        parse_mode="Markdown",
+                    )
+                except Exception as exc:
+                    await query.edit_message_text(
+                        f"❌ Rescue 启动失败: {exc}",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔄 重试", callback_data=f"act|{action_id}"),
+                            InlineKeyboardButton("取消", callback_data="cancel"),
+                        ]]),
+                    )
+
             elif action["type"] == "reboot":
                 service_name = action["service_name"]
                 await query.edit_message_text(f"⏳ 正在重启 `{service_name}`...")
@@ -5274,6 +5403,42 @@ def run_bot(cfg: dict):
 
         text = update.message.text or ""
         if not text.strip():
+            return
+
+        rescue_mail_input = context.user_data.get("rescue_mail")
+        if rescue_mail_input:
+            email = text.strip()
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+                await update.message.reply_text("❌ 邮箱格式无效，请重新发送")
+                return
+            action_id = rescue_mail_input["action_id"]
+            action = pending_actions.get(action_id)
+            if not action:
+                context.user_data.pop("rescue_mail", None)
+                await update.message.reply_text("❌ Rescue 操作已过期，请重新进入 `/servers`", parse_mode="Markdown")
+                return
+            confirm_id = str(int(time.time() * 1000))[-10:]
+            pending_actions[confirm_id] = {
+                "type": "rescue_boot", "service_name": action["service_name"],
+                "boot_id": action.get("rescue_boot_id"),
+                "public_key": None, "key_name": None, "rescue_mail": email,
+            }
+            context.user_data.pop("rescue_mail", None)
+            await update.message.reply_text(
+                f"⚠️ *确认从救援模式启动*\n\n"
+                f"🖥️ 服务器: `{action['service_name']}`\n"
+                f"✉️ 登录方式: OVH 将 Rescue 密码发送到 `{email}`\n\n"
+                f"确认后会设置 Rescue 网络启动并立即重启服务器，当前业务将中断。",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚠️ 确认进入 Rescue", callback_data=f"act|{confirm_id}")],
+                    [InlineKeyboardButton("取消", callback_data="cancel")],
+                ]),
+            )
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
             return
 
         sshkey_add = context.user_data.get("sshkey_add")
