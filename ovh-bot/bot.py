@@ -5421,18 +5421,42 @@ def run_bot(cfg: dict):
                         action.get("public_key"), action.get("rescue_mail"),
                     )
                     await asyncio.to_thread(ovh_client.reboot_server, service_name)
+                    info = await asyncio.to_thread(ovh_client.get_server_info, service_name)
+                    hardware = await asyncio.to_thread(ovh_client.get_server_hardware, service_name)
+                    disk_groups = extract_installable_disk_groups(hardware)
+                    memory = format_hardware_memory(hardware.get("memorySize")) if isinstance(hardware, dict) else ""
+                    default_group = hardware.get("defaultDiskGroupId") if isinstance(hardware, dict) else None
                     pending_actions.pop(action_id, None)
                     auth_text = (
                         f"SSH 密钥 `{action.get('key_name')}`"
                         if action.get("public_key")
                         else f"密码将发送到 `{action.get('rescue_mail')}`"
                     )
+                    detail_lines = [
+                        "✅ *Rescue 启动指令已发送*\n",
+                        f"🖥️ 服务器: `{service_name}`",
+                    ]
+                    ip_address = info.get("ip") or action.get("ip")
+                    if ip_address:
+                        detail_lines.append(f"🌐 IP: `{ip_address}`")
+                    if info.get("commercialRange"):
+                        detail_lines.append(f"📦 型号: `{info['commercialRange']}`")
+                    if info.get("datacenter"):
+                        detail_lines.append(f"📍 机房: `{info['datacenter']}`")
+                    if memory:
+                        detail_lines.append(f"🧠 内存: `{memory}`")
+                    if disk_groups:
+                        detail_lines.append("💾 硬盘:")
+                        detail_lines.extend(
+                            f"　{format_disk_group(group, default_group)}"
+                            for group in disk_groups
+                        )
+                    detail_lines.extend([
+                        f"🔐 认证: {auth_text}",
+                        "⏳ 服务器正在重启，稍后将从 Rescue 系统启动。",
+                    ])
                     await query.edit_message_text(
-                        f"✅ *Rescue 启动指令已发送*\n\n"
-                        f"🖥️ 服务器: `{service_name}`\n"
-                        f"🔐 认证: {auth_text}\n"
-                        f"⏳ 服务器正在重启，稍后将从 Rescue 系统启动。",
-                        parse_mode="Markdown",
+                        "\n".join(detail_lines), parse_mode="Markdown",
                     )
                 except Exception as exc:
                     await query.edit_message_text(

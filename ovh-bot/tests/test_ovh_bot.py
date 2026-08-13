@@ -784,6 +784,13 @@ class WatchTaskModeTests(unittest.TestCase):
         self.assertIn('find_server_marks_by_ip, queried_ip', source)
         self.assertIn('ipaddress.ip_address(text.strip())', source)
 
+    def test_rescue_success_displays_server_details(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('detail_lines.append(f"🌐 IP:', source)
+        self.assertIn('detail_lines.append(f"📦 型号:', source)
+        self.assertIn('detail_lines.append(f"🧠 内存:', source)
+        self.assertIn('detail_lines.append("💾 硬盘:")', source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)
