@@ -732,6 +732,7 @@ class WatchTaskModeTests(unittest.TestCase):
         source = Path(bot.__file__).read_text(encoding="utf-8")
         self.assertIn('InlineKeyboardButton("🛠️ 安装系统"', source)
         self.assertIn('InlineKeyboardButton("📋 查看服务器"', source)
+        self.assertIn('InlineKeyboardButton("🛟 救援模式启动", callback_data=f"srv|rescue|{action_id}")', source)
         self.assertIn('if parts[0] == "delivery"', source)
         self.assertIn('"📋 *服务器详情*\\n"', source)
         self.assertIn('disk_lines = "💾 硬盘:\\n"', source)

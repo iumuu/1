@@ -2601,6 +2601,7 @@ def run_bot(cfg: dict):
                                 text=text, parse_mode="Markdown",
                                 reply_markup=InlineKeyboardMarkup([
                                     [InlineKeyboardButton("🛠️ 安装系统", callback_data=f"delivery|install|{action_id}")],
+                                    [InlineKeyboardButton("🛟 救援模式启动", callback_data=f"srv|rescue|{action_id}")],
                                     [InlineKeyboardButton("📋 查看服务器", callback_data=f"delivery|view|{action_id}")],
                                 ]),
                             )
@@ -3634,6 +3635,7 @@ def run_bot(cfg: dict):
                     text, parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🛠️ 安装系统", callback_data=f"delivery|install|{action_id}")],
+                        [InlineKeyboardButton("🛟 救援模式启动", callback_data=f"srv|rescue|{action_id}")],
                         [InlineKeyboardButton("📋 查看服务器", callback_data=f"delivery|view|{action_id}")],
                     ]),
                 )
