@@ -776,6 +776,14 @@ class WatchTaskModeTests(unittest.TestCase):
     def test_hardware_memory_format(self):
         self.assertEqual(bot.format_hardware_memory({"value": 32768, "unit": "MB"}), "32GB")
 
+    def test_server_marks_use_sqlite_and_ip_lookup(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn('SERVER_MARKS_DB =', source)
+        self.assertIn('CREATE TABLE IF NOT EXISTS server_marks', source)
+        self.assertIn('record_server_mark, service_name', source)
+        self.assertIn('find_server_marks_by_ip, queried_ip', source)
+        self.assertIn('ipaddress.ip_address(text.strip())', source)
+
     def test_watch_order_limit_resets_current_round(self):
         self.assertEqual(bot.normalize_watch_round_orders(5), 5)
         self.assertEqual(bot.normalize_watch_round_orders(0), 1)

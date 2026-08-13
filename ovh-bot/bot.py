@@ -24,6 +24,8 @@ import json
 import logging
 import os
 import re
+import sqlite3
+import ipaddress
 import sys
 import time
 import traceback
@@ -2288,6 +2290,7 @@ def run_bot(cfg: dict):
     RESTOCK_FILE = _os.path.join(DATA_DIR, "restock_monitor.json")
     DELIVERY_FILE = _os.path.join(DATA_DIR, "delivery_notifications.json")
     SERVER_NOTES_FILE = _os.path.join(DATA_DIR, "server_notes.json")
+    SERVER_MARKS_DB = _os.path.join(DATA_DIR, "server_marks.db")
 
     def save_watch_tasks():
         """持久化监控任务到文件"""
@@ -2378,6 +2381,63 @@ def run_bot(cfg: dict):
             logger.warning(f"加载发货通知状态失败: {exc}")
 
     load_delivery_state()
+
+    def init_server_marks_db():
+        _os.makedirs(DATA_DIR, exist_ok=True)
+        with sqlite3.connect(SERVER_MARKS_DB) as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS server_marks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    service_name TEXT NOT NULL,
+                    ip TEXT NOT NULL,
+                    note TEXT NOT NULL,
+                    marked_at TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    cleared_at TEXT
+                )"""
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_server_marks_ip ON server_marks(ip)")
+
+    def record_server_mark(service_name: str, ip: str, note: str = "没中"):
+        if not ip:
+            logger.warning(f"服务器 {service_name} 没有 IP，无法写入标记历史")
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(SERVER_MARKS_DB) as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM server_marks WHERE service_name=? AND ip=? AND note=? AND active=1",
+                (service_name, ip, note),
+            ).fetchone()
+            if existing:
+                return
+            conn.execute(
+                "UPDATE server_marks SET active=0, cleared_at=? WHERE service_name=? AND active=1",
+                (now, service_name),
+            )
+            conn.execute(
+                "INSERT INTO server_marks(service_name, ip, note, marked_at, active) VALUES(?,?,?,?,1)",
+                (service_name, ip, note, now),
+            )
+
+    def clear_server_mark(service_name: str):
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(SERVER_MARKS_DB) as conn:
+            conn.execute(
+                "UPDATE server_marks SET active=0, cleared_at=? WHERE service_name=? AND active=1",
+                (now, service_name),
+            )
+
+    def find_server_marks_by_ip(ip: str) -> list:
+        with sqlite3.connect(SERVER_MARKS_DB) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT service_name, ip, note, marked_at, active, cleared_at "
+                "FROM server_marks WHERE ip=? ORDER BY marked_at DESC",
+                (ip,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    init_server_marks_db()
 
     def save_server_notes():
         """原子保存服务器备注。"""
@@ -3803,10 +3863,13 @@ def run_bot(cfg: dict):
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
                 save_server_notes()
+                info = await asyncio.to_thread(ovh_client.get_server_info, service_name)
+                await asyncio.to_thread(record_server_mark, service_name, info.get("ip", ""))
                 result_text = f"📝 已为 `{service_name}` 标记：*没中*"
             else:
                 server_notes.pop(service_name, None)
                 save_server_notes()
+                await asyncio.to_thread(clear_server_mark, service_name)
                 result_text = f"✅ 已清除 `{service_name}` 的“没中”备注"
                 next_label = "📝 标记“没中”"
                 next_callback = server_note_callback_data(
@@ -3837,12 +3900,18 @@ def run_bot(cfg: dict):
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
                 save_server_notes()
+                ip_address = action.get("ip", "")
+                if not ip_address:
+                    info = await asyncio.to_thread(ovh_client.get_server_info, service_name)
+                    ip_address = info.get("ip", "")
+                await asyncio.to_thread(record_server_mark, service_name, ip_address)
                 result_text = f"📝 已为 `{service_name}` 标记：*没中*"
                 next_label = "📝 清除“没中”备注"
                 next_callback = f"srvnote|clear|{action_id}"
             elif note_op == "clear":
                 server_notes.pop(service_name, None)
                 save_server_notes()
+                await asyncio.to_thread(clear_server_mark, service_name)
                 result_text = f"✅ 已清除 `{service_name}` 的“没中”备注"
                 next_label = "📝 标记“没中”"
                 next_callback = f"srvnote|miss|{action_id}"
@@ -5407,6 +5476,33 @@ def run_bot(cfg: dict):
         if not text.strip():
             return
 
+        try:
+            queried_ip = str(ipaddress.ip_address(text.strip()))
+        except ValueError:
+            queried_ip = None
+        if queried_ip:
+            records = await asyncio.to_thread(find_server_marks_by_ip, queried_ip)
+            if not records:
+                result_text = f"🔍 IP `{queried_ip}` 没有本地标记记录"
+            else:
+                lines = [f"🔍 *IP 标记记录*\n\n🌐 IP: `{queried_ip}`\n"]
+                for index, record in enumerate(records, 1):
+                    status = "🟢 当前仍标记" if record.get("active") else "⚪ 已清除"
+                    lines.append(
+                        f"{index}. 🖥️ `{record['service_name']}`\n"
+                        f"   📝 {record['note']} · {status}\n"
+                        f"   🕒 标记: {to_bjt(record['marked_at'])}"
+                    )
+                    if record.get("cleared_at"):
+                        lines.append(f"   🧹 清除: {to_bjt(record['cleared_at'])}")
+                result_text = "\n".join(lines)
+            await update.message.reply_text(result_text, parse_mode="Markdown")
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
         rescue_mail_input = context.user_data.get("rescue_mail")
         if rescue_mail_input:
             email = text.strip()
@@ -5724,6 +5820,16 @@ def run_bot(cfg: dict):
 
     async def restore_background_monitors(application):
         nonlocal watch_running, restock_running
+        try:
+            existing_servers = await asyncio.to_thread(ovh_client.list_servers)
+            server_ip_map = {item.get("name"): item.get("ip", "") for item in existing_servers}
+            for service_name in server_notes:
+                if get_server_note(service_name) == "没中" and server_ip_map.get(service_name):
+                    await asyncio.to_thread(
+                        record_server_mark, service_name, server_ip_map[service_name]
+                    )
+        except Exception as exc:
+            logger.warning(f"迁移现有服务器标记历史失败: {exc}")
         await application.bot.set_my_commands([
             BotCommand("start", "开始使用"),
             BotCommand("help", "查看完整帮助"),
